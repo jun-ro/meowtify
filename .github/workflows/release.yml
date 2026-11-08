@@ -7,13 +7,22 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
 jobs:
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Reads the cache that CI saved on main, because a tag has none of its own. Tests already ran
+      # in CI before the tag, so this job only builds.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
       - name: Check the tag matches the app version
         shell: bash
         run: |
@@ -22,10 +31,8 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
             exit 1
           fi
-      - name: Test
-        run: cargo test
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --locked
       - name: Package
         shell: bash
         run: |

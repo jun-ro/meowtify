@@ -3,22 +3,46 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "LICENSE"]
   pull_request:
+    paths-ignore: ["**.md", "LICENSE"]
+
+# A newer push replaces a run that is still going.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  # Incremental data never helps a clean runner, and it makes the cache bigger.
+  CARGO_INCREMENTAL: 0
+  # Line tables are enough for CI. This makes the test build and its cache smaller.
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
-  build:
-    # The jam crates come from the relay repository, so this needs both repositories to be
-    # readable. It is skipped while this repository is private.
-    if: ${{ !github.event.repository.private }}
+  # The two jobs run side by side on separate runners, so a run lasts as long as the slower one.
+  test:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --release
+        with:
+          shared-key: test
+          # Only main writes the cache. Pull requests and tags read it.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Test
-        run: cargo test
+        run: cargo test --locked
+
+  # Builds the same way a release does, which keeps the release cache warm.
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build
+        run: cargo build --release --locked
