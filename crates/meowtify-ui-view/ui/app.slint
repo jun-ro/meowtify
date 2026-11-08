@@ -652,6 +652,12 @@ export component MainWindow inherits Window {
     in property <string> library-info;
     /// The build, shown as a footnote in the sidebar.
     in property <string> app-version;
+    /// 0 idle, 1 working, 2 a newer version is ready to install.
+    in-out property <int> update-state: 0;
+    in-out property <string> update-info;
+    in-out property <string> update-notes;
+    callback check-update();
+    callback install-update();
     /// First run: no music folder yet. A welcome card asks for one.
     in-out property <bool> onboarding-open: false;
     in property <[ResultRow]> results;
@@ -1459,6 +1465,44 @@ export component MainWindow inherits Window {
                         }
                         Label {
                             text: "Meowtify reads music from this folder and saves downloads into it.";
+                            color: Theme.muted;
+                            font-size: 16px;
+                            wrap: word-wrap;
+                        }
+                        Label { text: "UPDATES"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
+                        HorizontalLayout {
+                            height: 40px;
+                            alignment: start;
+                            spacing: 12px;
+                            Rectangle {
+                                width: 200px;
+                                border-radius: 20px;
+                                background: root.update-state == 1 ? Theme.raised : (uu.has-hover ? #ffa24d : Theme.accent);
+                                uu := TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => {
+                                        if (root.update-state == 2) { root.install-update(); }
+                                        else if (root.update-state == 0) { root.check-update(); }
+                                    }
+                                }
+                                Label {
+                                    text: root.update-state == 2 ? "Install and restart" : "Check for updates";
+                                    color: root.update-state == 1 ? Theme.muted : #1a1209;
+                                    font-size: 16px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Label {
+                                text: root.update-info;
+                                color: Theme.muted;
+                                font-size: 16px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if root.update-notes != "" && root.update-state == 2: Label {
+                            text: root.update-notes;
                             color: Theme.muted;
                             font-size: 16px;
                             wrap: word-wrap;

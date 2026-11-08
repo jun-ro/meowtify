@@ -52,6 +52,17 @@ To run it you need nothing extra. It uses the `curl` that ships with Windows, an
 own copy of `yt-dlp` up to date. [`ffmpeg`](https://ffmpeg.org) is optional: with it, downloads
 are tagged and converted when needed.
 
+## Download and updates
+
+Grab `meowtify-windows-x64.exe` from the [latest release](https://github.com/jun-ro/meowtify/releases/latest)
+and run it. There is no installer. Put it in any folder you like.
+
+Meowtify checks for a newer release when it starts. If there is one, a message appears and
+**Settings, Updates** shows an **Install and restart** button. The app downloads the new
+program, checks it against the `SHA256SUMS` file in the release, replaces itself and starts
+again. Nothing is installed without that click. You can also press **Check for updates** at any
+time. The check uses your proxy setting, and it only talks to this repository's releases.
+
 ## Build from source
 
 You need:

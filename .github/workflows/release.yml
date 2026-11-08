@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check the tag matches the app version
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+      - name: Test
+        run: cargo test
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        shell: bash
+        run: |
+          mkdir dist
+          cp target/release/meowtify.exe dist/meowtify-windows-x64.exe
+          cd dist
+          sha256sum meowtify-windows-x64.exe > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes dist/meowtify-windows-x64.exe dist/SHA256SUMS

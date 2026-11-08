@@ -28,6 +28,7 @@ mod menu;
 mod mascot;
 mod profile;
 mod thumbs;
+mod update;
 
 pub use get::downloads_notifier;
 
@@ -296,6 +297,10 @@ pub fn run(
         }
     };
 
+    {
+        let browser = browser.clone();
+        update::install(&win, rt.clone(), Rc::new(move |text| browser.toast(text)));
+    }
     {
         let browser = browser.clone();
         jam::install(&win, handle.clone(), browser.library.clone(), rt.clone(), Rc::new(move |text| browser.toast(text)), open_links, settings);

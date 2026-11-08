@@ -191,7 +191,7 @@ fn curl() -> Command {
 
 async fn curl_run(mut c: Command) -> Result<Vec<u8>> {
     c.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let out = match tokio::time::timeout(Duration::from_secs(320), c.output()).await {
+    let out = match tokio::time::timeout(Duration::from_secs(920), c.output()).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(ProviderError::Tool("curl was not found, so yt-dlp cannot be downloaded".to_string()))
@@ -214,7 +214,7 @@ pub(crate) async fn curl_text(url: &str) -> Result<String> {
 
 pub(crate) async fn curl_file(url: &str, dest: &Path) -> Result<()> {
     let mut c = curl();
-    c.arg("-o").arg(dest).arg(url);
+    c.args(["--max-time", "900"]).arg("-o").arg(dest).arg(url);
     curl_run(c).await.map(|_| ())
 }
 
@@ -273,7 +273,7 @@ pub async fn fetch_thumbnail(url: &str) -> Result<Vec<u8>> {
 }
 
 /// The hash listed for the yt-dlp program in a `SHA2-256SUMS` file.
-fn expected_hash(sums: &str, asset: &str) -> Option<String> {
+pub(crate) fn expected_hash(sums: &str, asset: &str) -> Option<String> {
     sums.lines().find_map(|l| {
         let mut it = l.split_whitespace();
         let (hash, name) = (it.next()?, it.next()?);
@@ -282,7 +282,7 @@ fn expected_hash(sums: &str, asset: &str) -> Option<String> {
 }
 
 /// SHA-256 as lowercase hex. Reads in small blocks so a large file costs no memory.
-async fn hash_file(path: &Path) -> Option<String> {
+pub(crate) async fn hash_file(path: &Path) -> Option<String> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut f = std::fs::File::open(path).ok()?;

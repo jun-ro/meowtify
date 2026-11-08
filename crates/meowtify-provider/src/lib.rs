@@ -12,6 +12,7 @@ mod net;
 mod recommend;
 mod soundcloud;
 mod stream;
+mod update;
 mod youtube;
 mod ytdlp;
 
@@ -29,6 +30,9 @@ pub use manager::{DownloadManager, Job, JobState, DEFAULT_PARALLEL};
 pub use audius::Audius;
 pub use lyrics::{find as find_lyrics, Line as LyricLine, Lyrics, Query as LyricsQuery};
 pub use soundcloud::SoundCloud;
+pub mod app_update {
+    pub use crate::update::{check, clean_up, install, Release};
+}
 pub use youtube::{validate_youtube_url, yt_dlp_version, Tools, YouTube};
 pub use ytdlp::{fetch_thumbnail, suggest, UpdateOutcome, YtDlp};
 
