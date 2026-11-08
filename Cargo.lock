@@ -3190,7 +3190,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "meowtify-autoplay",
@@ -3207,7 +3207,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-autoplay"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "meowtify-core",
  "meowtify-library",
@@ -3227,7 +3227,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "tokio",
@@ -3235,7 +3235,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-discord"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "meowtify-core",
  "serde_json",
@@ -3253,7 +3253,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-jam-net"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3287,7 +3287,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-library"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "lofty",
@@ -3298,7 +3298,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-player"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "meowtify-core",
@@ -3309,7 +3309,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-plugin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3319,7 +3319,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-plugin-compile"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "meowtify-plugin",
  "wasmtime",
@@ -3327,7 +3327,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-plugin-tests"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "meowtify-plugin",
  "wasmtime",
@@ -3335,7 +3335,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-provider"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "meowtify-core",
@@ -3347,7 +3347,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "getrandom 0.3.4",
  "gif",
@@ -3367,7 +3367,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-ui-view"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "slint",
  "slint-build",
