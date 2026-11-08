@@ -85,27 +85,68 @@ fn turn_url(relay: &str) -> Option<String> {
     Some(format!("{}{}/turn", rest.0, rest.1.trim_end_matches('/')))
 }
 
-/// Asks the relay for ICE servers, with TURN credentials when it has them. Any failure gives
-/// the STUN-only default, so a relay without `/turn` (such as the native one) still works.
+/// Asks the relay for ICE servers, with TURN credentials when it has them.
 ///
-/// Uses the system's `curl`, like the rest of the app's downloads, to avoid an HTTP client
-/// that would be used once per jam.
-pub async fn fetch(relay: &str, hide_ip: bool) -> IceConfig {
-    let ice = fetch_servers(relay).await;
-    if hide_ip { ice.hiding_ip() } else { ice }
+/// A relay that answers without TURN (the 404 of a relay that has none) gives the STUN-only
+/// default. A request that fails gives the same default, unless `hide_ip` is set: then the
+/// caller must not fall back to a direct path, so it gets the reason as `Err`.
+///
+/// Uses the system's `curl.exe`, like the rest of the app's downloads, to avoid an HTTP client
+/// that would be used once per jam. `proxy` is the app's proxy setting, if any.
+pub async fn fetch(relay: &str, hide_ip: bool, proxy: Option<&str>) -> Result<IceConfig, String> {
+    match fetch_servers(relay, proxy).await {
+        Ok(ice) => Ok(if hide_ip { ice.hiding_ip() } else { ice }),
+        Err(why) if hide_ip => Err(why),
+        Err(_) => Ok(IceConfig::default()),
+    }
 }
 
-async fn fetch_servers(relay: &str) -> IceConfig {
-    let Some(url) = turn_url(relay) else { return IceConfig::default() };
-    let mut cmd = tokio::process::Command::new("curl");
-    cmd.args(["--silent", "--fail", "--max-time", "5", "--max-filesize", "65536", &url]).kill_on_drop(true);
+enum Asked {
+    /// The relay answered, but has no TURN.
+    NoTurn,
+    Failed(String),
+}
+
+async fn fetch_servers(relay: &str, proxy: Option<&str>) -> Result<IceConfig, String> {
+    let Some(url) = turn_url(relay) else { return Ok(IceConfig::default()) };
+    let mut why = String::new();
+    for attempt in 0..2 {
+        match ask(&url, proxy).await {
+            Ok(text) => return Ok(IceConfig::from_json(&text).unwrap_or_default()),
+            Err(Asked::NoTurn) => return Ok(IceConfig::default()),
+            Err(Asked::Failed(w)) => why = w,
+        }
+        if attempt == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        }
+    }
+    Err(why)
+}
+
+async fn ask(url: &str, proxy: Option<&str>) -> Result<String, Asked> {
+    let mut cmd = tokio::process::Command::new(if cfg!(windows) { "curl.exe" } else { "curl" });
+    cmd.args(["--silent", "--show-error", "--fail", "--connect-timeout", "8", "--max-time", "12", "--max-filesize", "65536"]);
+    if let Some(p) = proxy {
+        cmd.arg("--proxy").arg(p);
+    }
+    cmd.arg(url).stdin(std::process::Stdio::null()).kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    let out = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await;
-    match out {
-        Ok(Ok(o)) if o.status.success() => String::from_utf8(o.stdout).ok().and_then(|t| IceConfig::from_json(&t)).unwrap_or_default(),
-        _ => IceConfig::default(),
+    let out = match tokio::time::timeout(std::time::Duration::from_secs(16), cmd.output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => return Err(Asked::Failed("curl was not found on this computer".into())),
+        Ok(Err(e)) => return Err(Asked::Failed(e.to_string())),
+        Err(_) => return Err(Asked::Failed("the request timed out".into())),
+    };
+    if out.status.success() {
+        return String::from_utf8(out.stdout).map_err(|_| Asked::Failed("the answer was not text".into()));
     }
+    let said = String::from_utf8_lossy(&out.stderr);
+    let said = said.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    if said.contains("returned error: 404") {
+        return Err(Asked::NoTurn);
+    }
+    Err(Asked::Failed(if said.is_empty() { "the request failed".into() } else { said.chars().take(160).collect() }))
 }
 
 #[cfg(test)]

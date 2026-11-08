@@ -15,6 +15,8 @@ use tokio_tungstenite::tungstenite::Message;
 const KEEPALIVE: Duration = Duration::from_secs(25);
 /// Failed attempts in a row before the relay is given up on. The waits add up to about a minute.
 const MAX_FAILURES: u32 = 8;
+/// A connection that ends sooner than this did not work, even though it opened.
+const STABLE_AFTER: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
@@ -31,8 +33,8 @@ pub struct RelayConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RelayEvent {
     Msg(ServerMsg),
-    /// The connection dropped; the client is trying again.
-    Reconnecting,
+    /// The connection dropped, with the reason; the client is trying again.
+    Reconnecting(String),
     /// Over for good: the room is gone, the host removed us, or the relay cannot be reached.
     Down(String),
 }
@@ -79,10 +81,11 @@ async fn run(cfg: RelayConfig, mut cmds: mpsc::UnboundedReceiver<ClientMsg>, eve
     let mut resume: Option<Resume> = None;
     let mut failures = 0u32;
     loop {
-        let mut was_connected = false;
+        let mut stable = false;
+        let why;
         match tokio_tungstenite::connect_async(&url).await {
             Ok((ws, _)) => {
-                was_connected = true;
+                let opened = std::time::Instant::now();
                 match session(&cfg, ws, &mut cmds, &events, &mut resume).await {
                     Ended::Over(why) => {
                         let _ = events.send(RelayEvent::Down(why));
@@ -90,15 +93,18 @@ async fn run(cfg: RelayConfig, mut cmds: mpsc::UnboundedReceiver<ClientMsg>, eve
                     }
                     Ended::Dropped => {}
                 }
+                stable = opened.elapsed() >= STABLE_AFTER;
+                why = "the connection closed".to_string();
             }
-            Err(_) => {}
+            Err(e) => why = e.to_string(),
         }
-        failures = if was_connected { 0 } else { failures + 1 };
+        // A connection that opens and closes at once is a failure too, or the loop would never end.
+        failures = if stable { 0 } else { failures + 1 };
         if failures >= MAX_FAILURES {
-            let _ = events.send(RelayEvent::Down("cannot reach the relay".into()));
+            let _ = events.send(RelayEvent::Down(format!("cannot reach the relay ({why})")));
             return;
         }
-        let _ = events.send(RelayEvent::Reconnecting);
+        let _ = events.send(RelayEvent::Reconnecting(why));
         // What was queued for the old connection is out of date.
         while cmds.try_recv().is_ok() {}
         tokio::time::sleep(backoff(failures)).await;

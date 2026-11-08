@@ -62,7 +62,8 @@ pub enum GuestEvent {
     Do(Step),
     /// The host refused a request.
     Denied(String),
-    Reconnecting,
+    /// The relay connection dropped, with the reason. It is trying again.
+    Reconnecting(String),
     /// The jam is over for the guest.
     Down(String),
 }
@@ -195,7 +196,7 @@ impl Actor {
                     let Some(ev) = ev else { return };
                     match ev {
                         RelayEvent::Msg(msg) => self.on_relay(&relay, &link_tx, msg).await,
-                        RelayEvent::Reconnecting => self.emit(GuestEvent::Reconnecting),
+                        RelayEvent::Reconnecting(why) => self.emit(GuestEvent::Reconnecting(why)),
                         RelayEvent::Down(why) => {
                             self.emit(GuestEvent::Down(why));
                             return;

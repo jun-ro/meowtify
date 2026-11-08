@@ -75,7 +75,8 @@ pub enum HostEvent {
     Do { from: String, action: Action },
     /// A guest suggested a song.
     Suggest { from: String, text: String },
-    Reconnecting,
+    /// The relay connection dropped, with the reason. It is trying again.
+    Reconnecting(String),
     /// The jam is over for the host.
     Down(String),
 }
@@ -222,7 +223,7 @@ impl Actor {
                     let Some(ev) = ev else { return };
                     match ev {
                         RelayEvent::Msg(msg) => self.on_relay(&relay, &link_tx, msg).await,
-                        RelayEvent::Reconnecting => { let _ = self.events.send(HostEvent::Reconnecting); }
+                        RelayEvent::Reconnecting(why) => { let _ = self.events.send(HostEvent::Reconnecting(why)); }
                         RelayEvent::Down(why) => {
                             let _ = self.events.send(HostEvent::Down(why));
                             return;

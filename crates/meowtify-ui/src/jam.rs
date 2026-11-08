@@ -156,6 +156,11 @@ struct Player {
     queue_rev: u64,
 }
 
+/// The relay did not answer the request for its TURN server, so hiding the address is not possible.
+fn no_reach(why: &str) -> String {
+    format!("Could not ask the relay for its TURN server ({why}). Check the connection or the proxy in Settings, or turn on Share my IP to connect directly.")
+}
+
 const NO_TURN: &str = "This relay has no TURN server, so it cannot hide your IP address. Turn on Share my IP to connect directly, or use another relay.";
 
 /// The hue the window holds: 0 to 359, or negative for none.
@@ -256,11 +261,17 @@ impl Jam {
 
         let cfg_name = name.clone();
         self.rt.spawn(async move {
-            let ice = fetch_ice(&relay, hide_ip).await;
-            if !ice.usable() {
-                let _ = slint::invoke_from_event_loop(move || with(|j| j.blocked(generation, NO_TURN)));
-                return;
-            }
+            let ice = match fetch_ice(&relay, hide_ip, meowtify_provider::proxy().as_deref()).await {
+                Ok(ice) if ice.usable() => ice,
+                Ok(_) => {
+                    let _ = slint::invoke_from_event_loop(move || with(|j| j.blocked(generation, NO_TURN)));
+                    return;
+                }
+                Err(why) => {
+                    let _ = slint::invoke_from_event_loop(move || with(|j| j.blocked(generation, &no_reach(&why))));
+                    return;
+                }
+            };
             let (host, mut events) = Host::start(HostConfig {
                 relay: RelayConfig { url: relay, code, name: cfg_name, hue, host_key: Some(key) },
                 link: Options { ice, bind: Vec::new() },
@@ -323,11 +334,17 @@ impl Jam {
         let cache_dir = self.cache_dir.clone();
         let local_copy = self.library.clone().map(|lib| own_copy_finder(lib, cache_dir.clone()));
         self.rt.spawn(async move {
-            let ice = fetch_ice(&link.relay, hide_ip).await;
-            if !ice.usable() {
-                let _ = slint::invoke_from_event_loop(move || with(|j| j.blocked(generation, NO_TURN)));
-                return;
-            }
+            let ice = match fetch_ice(&link.relay, hide_ip, meowtify_provider::proxy().as_deref()).await {
+                Ok(ice) if ice.usable() => ice,
+                Ok(_) => {
+                    let _ = slint::invoke_from_event_loop(move || with(|j| j.blocked(generation, NO_TURN)));
+                    return;
+                }
+                Err(why) => {
+                    let _ = slint::invoke_from_event_loop(move || with(|j| j.blocked(generation, &no_reach(&why))));
+                    return;
+                }
+            };
             let (guest, mut events) = Guest::join(GuestConfig {
                 relay: RelayConfig { url: link.relay, code: link.code, name, hue, host_key: None },
                 link: Options { ice, bind: Vec::new() },
@@ -462,7 +479,7 @@ impl Jam {
                 texts.push(text.clone());
                 self.suggestions.push(format!("{from}: {text}").into());
             }
-            HostEvent::Reconnecting => self.status("Lost the relay. Trying again…"),
+            HostEvent::Reconnecting(why) => self.status(&format!("Lost the relay ({why}). Trying again…")),
             HostEvent::Down(why) => self.finish(&format!("The jam closed: {why}")),
         }
     }
@@ -595,7 +612,7 @@ impl Jam {
             }
             GuestEvent::Do(step) => self.apply_step(step),
             GuestEvent::Denied(what) => self.say(&format!("The host said no: {what}")),
-            GuestEvent::Reconnecting => self.status("Lost the relay. Trying again…"),
+            GuestEvent::Reconnecting(why) => self.status(&format!("Lost the relay ({why}). Trying again…")),
             GuestEvent::Down(why) => self.finish(&format!("The jam closed: {why}")),
         }
     }
