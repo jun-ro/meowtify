@@ -1,8 +1,9 @@
 name: Release
 
+# Releases are built locally and uploaded with `gh release create`.
+# This workflow is a manual fallback: run it on a tag ref. A pushed tag does not start it.
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
