@@ -92,6 +92,11 @@ impl Thumbs {
         }
     }
 
+    /// The cover files on disk, for the settings page to size and clear.
+    pub(crate) fn disk(&self) -> Option<Arc<DiskCache>> {
+        self.disk.clone()
+    }
+
     /// The decoded cover for `id`, when it is in memory.
     pub(crate) fn cached(&self, id: &str) -> Option<Image> {
         self.images.borrow_mut().get(id)
@@ -129,12 +134,15 @@ impl Thumbs {
                 None => None,
             };
             let bytes = match cached {
-                Some(b) => Some(b),
+                Some(b) => Some(Arc::new(b)),
                 None => match fetch_thumbnail(&url).await {
                     Ok(b) => {
+                        let b = Arc::new(b);
                         if let Some(d) = &disk {
+                            // Written while the image decodes, without a second copy of the
+                            // bytes. A failed write only means a fetch next time.
                             let (d, k, b2) = (d.clone(), key.clone(), b.clone());
-                            let _ = tokio::task::spawn_blocking(move || d.put(&k, &b2)).await;
+                            let _ = tokio::task::spawn_blocking(move || d.put(&k, &b2));
                         }
                         Some(b)
                     }

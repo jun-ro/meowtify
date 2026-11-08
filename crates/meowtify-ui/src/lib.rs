@@ -19,6 +19,7 @@ use slint::{
 };
 use tokio::sync::broadcast;
 
+mod cache;
 mod get;
 #[cfg(any(debug_assertions, feature = "dev"))]
 mod dev;
@@ -227,6 +228,7 @@ pub fn run(
     }
     let thumbs = Rc::new(thumbs::Thumbs::new(rt.clone()));
     THUMBS.with(|t| *t.borrow_mut() = Some(thumbs.clone()));
+    cache::wire(&win, &rt, thumbs.disk());
     let model = TrackModel::new(thumbs.clone());
     {
         // Weak: the model owns the thumbnails, whose listener list must not own the model.

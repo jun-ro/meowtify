@@ -649,6 +649,12 @@ export component MainWindow inherits Window {
     in-out property <string> tool-info;
     in-out property <bool> tool-busy;
     callback update-tools();
+    /// Size of the cover and lyrics caches, and the button that empties them.
+    in-out property <string> cache-info;
+    in-out property <bool> cache-busy;
+    callback refresh-cache();
+    callback clear-cache();
+    changed view => { if (self.view == 1) { self.refresh-cache(); } }
     in property <string> library-info;
     /// The build, shown as a footnote in the sidebar.
     in property <string> app-version;
@@ -1138,8 +1144,11 @@ export component MainWindow inherits Window {
                     }
                     // Export the open playlist as an .m3u8 file.
                     if root.view == 0 && !root.show-results && root.current-source > 0: Pill {
+                        // A Pill placed by x and y fills its parent unless given a width.
+                        width: 84px;
+                        height: 30px;
                         x: parent.width - self.width - 24px - (root.downloads-label != "Downloads" ? 150px : 0px);
-                        y: 20px;
+                        y: 22px;
                         text: "Export";
                         primary: false;
                         clicked => {
@@ -1149,6 +1158,7 @@ export component MainWindow inherits Window {
                     }
                     // Downloads shortcut, only while something is downloading.
                     if root.downloads-label != "Downloads": Pill {
+                        width: 140px;
                         x: parent.width - self.width - 24px;
                         y: 20px;
                         text: root.downloads-label;
@@ -1415,6 +1425,8 @@ export component MainWindow inherits Window {
                     height: 100%;
                     background: Theme.bg;
                     TouchArea { }
+                    // Scrolls, so a short window never pushes the player bar out of view.
+                    Flickable {
                     VerticalLayout {
                         padding: 32px;
                         spacing: 8px;
@@ -1536,6 +1548,38 @@ export component MainWindow inherits Window {
                         }
                         Label {
                             text: "YouTube changes often. If downloads fail with \"not available on this app\", update.";
+                            color: Theme.muted;
+                            font-size: 16px;
+                            wrap: word-wrap;
+                        }
+                        Label { text: "CACHE"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
+                        HorizontalLayout {
+                            height: 40px;
+                            alignment: start;
+                            spacing: 12px;
+                            Rectangle {
+                                width: 160px;
+                                border-radius: 20px;
+                                background: root.cache-busy ? Theme.raised : (uc.has-hover ? #ffa24d : Theme.accent);
+                                uc := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.clear-cache(); } }
+                                Label {
+                                    text: "Clear cache";
+                                    color: root.cache-busy ? Theme.muted : #1a1209;
+                                    font-size: 16px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Label {
+                                text: root.cache-info;
+                                color: Theme.muted;
+                                font-size: 16px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Label {
+                            text: "Covers and lyrics are saved so they load fast. Clearing them is safe; they download again when needed.";
                             color: Theme.muted;
                             font-size: 16px;
                             wrap: word-wrap;
@@ -1709,6 +1753,7 @@ export component MainWindow inherits Window {
                             wrap: word-wrap;
                         }
                     }
+                    }
                 }
 
 
@@ -1750,6 +1795,9 @@ export component MainWindow inherits Window {
                             Pill {
                                 x: parent.width - 116px;
                                 y: 21px;
+                                // Without a width a pill in a plain rectangle is as wide as the
+                                // rectangle, so it ran off the right edge with its text out of view.
+                                width: 100px;
                                 text: "Shuffle";
                                 primary: false;
                                 clicked => { root.jam-shuffle(); }
@@ -2417,7 +2465,11 @@ export component MainWindow inherits Window {
     }
 
     // Lyrics, over the right side above the player bar.
-    if root.lyrics-open: Rectangle {
+    // Always there, so it can fade; hidden once the fade ends so it costs nothing and takes no clicks.
+    Rectangle {
+        opacity: root.lyrics-open ? 1 : 0;
+        animate opacity { duration: 160ms; easing: ease-out; }
+        visible: root.lyrics-open || self.opacity > 0.01;
         width: min(440px, root.width - 32px);
         height: min(440px, root.height - root.bar-h - 90px);
         x: root.width - self.width - 16px;

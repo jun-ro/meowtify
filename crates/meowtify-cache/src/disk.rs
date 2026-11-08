@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -31,9 +31,44 @@ struct Meta {
 
 struct Index {
     files: HashMap<String, Meta>, // file stem -> meta
+    /// tick -> file stem, oldest first. Ticks are unique, so the first entry is the LRU victim
+    /// and eviction does not scan every file.
+    order: BTreeMap<u64, String>,
     bytes: u64,
     tick: u64,
     next_version: u64,
+}
+
+impl Index {
+    fn new() -> Self {
+        Index { files: HashMap::new(), order: BTreeMap::new(), bytes: 0, tick: 0, next_version: 0 }
+    }
+
+    /// Adds a file the caller already removed any older version of.
+    fn insert(&mut self, stem: String, size: u64) {
+        self.tick += 1;
+        self.next_version += 1;
+        self.bytes += size;
+        self.order.insert(self.tick, stem.clone());
+        self.files.insert(stem, Meta { size, tick: self.tick, version: self.next_version });
+    }
+
+    fn remove(&mut self, stem: &str) -> Option<Meta> {
+        let m = self.files.remove(stem)?;
+        self.order.remove(&m.tick);
+        self.bytes -= m.size;
+        Some(m)
+    }
+
+    /// Marks `stem` as the most recently used.
+    fn touch(&mut self, stem: &str) {
+        self.tick += 1;
+        if let Some(m) = self.files.get_mut(stem) {
+            self.order.remove(&m.tick);
+            m.tick = self.tick;
+            self.order.insert(self.tick, stem.to_owned());
+        }
+    }
 }
 
 /// Keyed byte store in a folder with a total on-disk byte limit and LRU eviction.
@@ -80,13 +115,9 @@ impl DiskCache {
             }
         }
         found.sort_by_key(|f| f.2);
-        let mut idx = Index { files: HashMap::new(), bytes: 0, tick: 0, next_version: 0 };
+        let mut idx = Index::new();
         for (stem, size, _) in found {
-            idx.tick += 1;
-            idx.bytes += size;
-            idx.next_version += 1;
-            let version = idx.next_version;
-            idx.files.insert(stem, Meta { size, tick: idx.tick, version });
+            idx.insert(stem, size);
         }
         let cache = Self { dir, limit: max_bytes, index: Mutex::new(idx) };
         {
@@ -129,10 +160,19 @@ impl DiskCache {
         if only_version.is_some_and(|v| g.files.get(stem).is_none_or(|m| m.version != v)) {
             return;
         }
-        if let Some(m) = g.files.remove(stem) {
-            g.bytes -= m.size;
-        }
+        g.remove(stem);
         let _ = fs::remove_file(self.path(stem));
+    }
+
+    /// Deletes every stored file. Returns how many were removed.
+    pub fn clear(&self) -> usize {
+        let mut g = self.lock();
+        let stems: Vec<String> = g.files.keys().cloned().collect();
+        for stem in &stems {
+            g.remove(stem);
+            let _ = fs::remove_file(self.path(stem));
+        }
+        stems.len()
     }
 
     /// Read the bytes for `key`. Missing, partial or corrupt files return `None`
@@ -149,12 +189,7 @@ impl DiskCache {
         };
         match Self::decode(data) {
             Some(payload) => {
-                let mut g = self.lock();
-                g.tick += 1;
-                let t = g.tick;
-                if let Some(m) = g.files.get_mut(&stem) {
-                    m.tick = t;
-                }
+                self.lock().touch(&stem);
                 Some(payload)
             }
             None => {
@@ -195,8 +230,10 @@ impl DiskCache {
             f.write_all(MAGIC)?;
             f.write_all(&(bytes.len() as u64).to_le_bytes())?;
             f.write_all(&checksum(bytes).to_le_bytes())?;
-            f.write_all(bytes)?;
-            f.sync_all()
+            // No fsync: a cover can be fetched again, and a file that a crash left short or
+            // empty fails the length and checksum test in `get` and counts as a miss. An fsync
+            // per cover costs milliseconds on Windows for no gain.
+            f.write_all(bytes)
         })();
         if let Err(e) = res {
             let _ = fs::remove_file(&tmp);
@@ -209,14 +246,8 @@ impl DiskCache {
             let _ = fs::remove_file(&tmp);
             return Err(e);
         }
-        if let Some(old) = g.files.remove(&stem) {
-            g.bytes -= old.size;
-        }
-        g.tick += 1;
-        g.next_version += 1;
-        let (t, version) = (g.tick, g.next_version);
-        g.bytes += total;
-        g.files.insert(stem, Meta { size: total, tick: t, version });
+        g.remove(&stem);
+        g.insert(stem, total);
         self.evict(&mut g);
         Ok(true)
     }
@@ -229,10 +260,7 @@ impl DiskCache {
 
     fn evict(&self, g: &mut Index) {
         while g.bytes > self.limit {
-            let Some(victim) = g.files.iter().min_by_key(|(_, m)| m.tick).map(|(k, _)| k.clone())
-            else {
-                break;
-            };
+            let Some((_, victim)) = g.order.pop_first() else { break };
             if let Some(m) = g.files.remove(&victim) {
                 g.bytes -= m.size;
             }
@@ -268,6 +296,37 @@ mod tests {
         }
         assert_eq!(c.used_bytes(), dir_bytes(td.path()));
         assert!(!c.put("big", &[0u8; 1000]).unwrap());
+    }
+
+    #[test]
+    fn clear_removes_every_file_and_the_cache_still_works() {
+        let td = tempfile::tempdir().unwrap();
+        let c = DiskCache::open(td.path(), 10_000).unwrap();
+        for k in ["a", "b", "c"] {
+            c.put(k, &[1u8; 50]).unwrap();
+        }
+        assert_eq!(c.clear(), 3);
+        assert!(c.is_empty() && c.used_bytes() == 0);
+        assert_eq!(dir_bytes(td.path()), 0);
+        assert!(c.get("a").is_none());
+        assert!(c.put("a", &[2u8; 50]).unwrap());
+        assert_eq!(c.get("a").unwrap(), vec![2u8; 50]);
+        assert_eq!(c.used_bytes(), dir_bytes(td.path()));
+    }
+
+    #[test]
+    fn order_index_stays_in_step_with_files() {
+        let td = tempfile::tempdir().unwrap();
+        let c = DiskCache::open(td.path(), 10_000).unwrap();
+        for i in 0..10 {
+            c.put(&format!("k{i}"), &[0u8; 20]).unwrap();
+            c.get(&format!("k{}", i / 2));
+            c.put(&format!("k{}", i / 3), &[0u8; 30]).unwrap(); // overwrite
+        }
+        c.remove("k1");
+        let g = c.lock();
+        assert_eq!(g.order.len(), g.files.len());
+        assert!(g.files.iter().all(|(s, m)| g.order.get(&m.tick) == Some(s)));
     }
 
     #[test]

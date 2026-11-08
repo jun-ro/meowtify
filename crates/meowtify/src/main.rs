@@ -139,9 +139,16 @@ fn main() {
         a.stop();
     }
 
-    let _ = driver.join();
+    // Closing the window ends the program. The core stops once every handle is dropped, but a
+    // helper that still holds one (autoplay, a Jam link) must not keep the process alive with no
+    // window. Give the core a moment to finish, so a running download is stopped cleanly, then exit.
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while !driver.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     if let Err(e) = result {
         eprintln!("ui error: {e}");
         std::process::exit(1);
     }
+    std::process::exit(0);
 }
