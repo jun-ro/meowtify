@@ -1,0 +1,12 @@
+[package]
+name = "meowtify-plugin-compile"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Install-time helper that turns plugin .wasm into .cwasm using the host's exact engine config."
+
+[dependencies]
+meowtify-plugin = { path = "../meowtify-plugin" }
+wasmtime = { version = "50.0.1", default-features = false, features = ["std", "runtime", "component-model", "pooling-allocator", "cranelift"] }

@@ -1,0 +1,11 @@
+[package]
+name = "meowtify-cache"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+[dev-dependencies]
+tempfile = "3"

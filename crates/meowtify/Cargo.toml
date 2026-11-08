@@ -1,0 +1,27 @@
+[package]
+name = "meowtify"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[features]
+# The `--mock` catalogue and the window's screenshot aids; always on in debug builds.
+dev = ["meowtify-ui/dev"]
+
+[dependencies]
+meowtify-autoplay = { path = "../meowtify-autoplay" }
+meowtify-core = { path = "../meowtify-core" }
+meowtify-discord = { path = "../meowtify-discord" }
+meowtify-jam.workspace = true
+meowtify-ui = { path = "../meowtify-ui" }
+meowtify-library = { path = "../meowtify-library" }
+meowtify-player = { path = "../meowtify-player" }
+meowtify-provider = { path = "../meowtify-provider" }
+async-trait = "0.1"
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time", "net"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

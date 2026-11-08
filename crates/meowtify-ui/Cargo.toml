@@ -1,0 +1,27 @@
+[package]
+name = "meowtify-ui"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Screenshot and test aids driven by MEOWTIFY_* variables; always on in debug builds.
+dev = []
+
+[dependencies]
+meowtify-autoplay = { path = "../meowtify-autoplay" }
+meowtify-core = { path = "../meowtify-core" }
+meowtify-jam.workspace = true
+meowtify-jam-net = { path = "../meowtify-jam-net" }
+meowtify-library = { path = "../meowtify-library" }
+meowtify-provider = { path = "../meowtify-provider" }
+meowtify-cache = { path = "../meowtify-cache" }
+meowtify-ui-view = { path = "../meowtify-ui-view" }
+getrandom = "0.3"
+rfd = "0.17"
+slint = { workspace = true }
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+png = { version = "0.18", default-features = false }
+gif = { version = "0.14", default-features = false, features = ["std"] }

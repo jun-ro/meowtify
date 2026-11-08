@@ -1,0 +1,14 @@
+[package]
+name = "meowtify-plugin"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sandboxed WebAssembly plugin host for Meowtify (no Cranelift in the shipped build)."
+
+[dependencies]
+wasmtime = { version = "50.0.1", default-features = false, features = ["std", "runtime", "component-model", "pooling-allocator"] }
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+toml = { version = "0.8", default-features = false, features = ["parse"] }

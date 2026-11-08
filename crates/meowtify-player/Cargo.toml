@@ -1,0 +1,18 @@
+[package]
+name = "meowtify-player"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local audio playback behind the core PlaybackEngine trait."
+
+[dependencies]
+meowtify-core = { path = "../meowtify-core" }
+meowtify-library = { path = "../meowtify-library" }
+async-trait = "0.1"
+tokio = { version = "1", default-features = false, features = ["sync", "time"] }
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "symphonia-aac", "symphonia-isomp4", "symphonia-mp3", "symphonia-flac", "symphonia-vorbis", "symphonia-wav"] }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }

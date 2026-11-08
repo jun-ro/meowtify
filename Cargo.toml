@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# A plain `cargo build` or `cargo test` covers the app. Use `--workspace` for everything,
+# including the plugin compiler.
+default-members = ["crates/meowtify"]
+
+# One feature set for slint, shared by the view and controller crates.
+# Keeps feature unification stable so slint is built once.
+[workspace.dependencies]
+# The jam wire format lives in the relay repository, so client and server cannot drift apart.
+meowtify-jam = { git = "https://github.com/jun-ro/meowtify-relay", tag = "v0.1.0" }
+meowtify-jam-relay = { git = "https://github.com/jun-ro/meowtify-relay", tag = "v0.1.0" }
+slint = { version = "1.18", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "compat-1-2", "unstable-winit-030"] }
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+repository = "https://github.com/jun-ro/meowtify"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+# Faster dev builds. Line tables are enough for backtraces. Dependencies get no debug info.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# Optimizing all host tools slows clean builds; keep the build toolchain unoptimized.
+[profile.dev.build-override]
+opt-level = 0

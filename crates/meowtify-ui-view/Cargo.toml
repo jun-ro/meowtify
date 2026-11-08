@@ -1,0 +1,17 @@
+[package]
+name = "meowtify-ui-view"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[dependencies]
+slint = { workspace = true }
+
+[build-dependencies]
+slint-build = { version = "1.18", default-features = false, features = ["compat-1-18"] }
+
+[lib]
+test = false

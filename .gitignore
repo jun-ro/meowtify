@@ -1,0 +1,10 @@
+target/
+.env
+.env.*
+*.log
+
+# Your own music, if you keep it next to the code while developing.
+/songs/
+
+# The plugin test guest builds for wasm in its own folder.
+/crates/meowtify-plugin/test-guest/target/

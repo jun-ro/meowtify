@@ -1,0 +1,2741 @@
+import { ListView } from "std-widgets.slint";
+// One pixel font for the whole app. It also covers kaomoji and other rare characters.
+import "fonts/unifont-heavy.otf";
+
+export struct Row {
+    /// File path. Matches `now-uri` to mark the playing row.
+    key: string,
+    title: string,
+    artist: string,
+    album: string,
+    duration: string,
+    art: image,
+}
+
+export struct ResultRow {
+    /// Video id. Matches `now-vid` to mark the playing row.
+    key: string,
+    title: string,
+    subtitle: string,
+    /// "" = can be played, otherwise a short status such as "In library".
+    state: string,
+    art: image,
+}
+
+/// One entry of the sidebar queue. `leaving` plays the exit animation before the row is dropped.
+export struct QueueRow {
+    title: string,
+    progress: float, // 0.0 ..= 1.0
+    active: bool,
+    failed: bool,
+    leaving: bool,
+}
+
+/// A song waiting in the queue. kind: 0 queued by the user, 1 added by autoplay, 2 from the playlist or library.
+/// A playlist in the "add to playlist" search: its name and its place in the sidebar list.
+export struct PickRow {
+    name: string,
+    index: int,
+}
+
+export struct UpNext {
+    title: string,
+    artist: string,
+    kind: int,
+    art: image,
+}
+
+/// One person in a jam. state: "connected", "connecting…" or "offline".
+/// One line of the lyrics panel. `kind` is 0 for a line already sung, 1 for the line now, 2 for the rest.
+export struct LyricRow {
+    text: string,
+    kind: int,
+}
+
+export struct JamSwatch {
+    hue: int,
+    color: color,
+}
+
+export struct JamMember {
+    id: int,
+    name: string,
+    state: string,
+    avatar: image,
+    host: bool,
+    control: bool,
+    skip: bool,
+    add: bool,
+}
+
+export struct JobRow {
+    title: string,
+    status: string,
+    progress: float, // 0.0 ..= 1.0
+    active: bool,
+    failed: bool,
+}
+
+// Palette.
+global Theme {
+    out property <color> bg: #121214;
+    out property <color> panel: #18181b;
+    out property <color> raised: #232328;
+    out property <color> hover: #2b2b31;
+    out property <color> text: #f4f4f5;
+    out property <color> muted: #a1a1aa;
+    out property <color> accent: #ff8c1a;
+    out property <color> accent-hot: #ffa24d;
+    out property <color> accent-dim: #3a2a18;
+    out property <color> danger: #e5484d;
+}
+
+/// Text in the app font. Use this instead of Text.
+component Label inherits Text {
+    font-family: "Unifont Heavy";
+}
+
+/// A number with minus and plus buttons.
+component Stepper inherits HorizontalLayout {
+    in property <string> label;
+    in-out property <int> value;
+    in property <int> min: 0;
+    in property <int> max: 30;
+    callback changed(int);
+    height: 36px;
+    spacing: 8px;
+    alignment: start;
+    Rectangle {
+        width: 30px;
+        height: 28px;
+        y: 4px;
+        border-radius: 6px;
+        background: dec.has-hover ? Theme.hover : Theme.raised;
+        Label { text: "-"; color: Theme.text; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+        dec := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { if (root.value > root.min) { root.value -= 1; root.changed(root.value); } }
+        }
+    }
+    Label { text: root.value; color: Theme.text; font-size: 16px; width: 30px; horizontal-alignment: center; vertical-alignment: center; }
+    Rectangle {
+        width: 30px;
+        height: 28px;
+        y: 4px;
+        border-radius: 6px;
+        background: inc.has-hover ? Theme.hover : Theme.raised;
+        Label { text: "+"; color: Theme.text; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+        inc := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { if (root.value < root.max) { root.value += 1; root.changed(root.value); } }
+        }
+    }
+    Label { text: root.label; color: Theme.text; font-size: 16px; vertical-alignment: center; }
+}
+
+/// Round toggle with a drawn icon: "shuffle" or "repeat". Lit in accent while on.
+/// `badge` is a short mark in the middle, such as "1" for repeat-one.
+component ToggleIcon inherits Rectangle {
+    in property <string> kind;
+    in property <bool> active;
+    in property <string> badge;
+    callback clicked();
+    width: 36px;
+    height: 36px;
+    border-radius: 18px;
+    background: ta.pressed ? Theme.raised : (ta.has-hover ? Theme.hover : transparent);
+    animate background { duration: 120ms; }
+    ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.clicked(); } }
+    Path {
+        width: 16px;
+        height: 14px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2 - 2px;
+        viewbox-width: 16;
+        viewbox-height: 14;
+        commands: root.kind == "shuffle"
+            ? "M 0 3 L 3 3 L 10 11 L 13 11 M 11 9 L 14 11 L 11 13 M 0 11 L 3 11 L 5 8.6 M 8.6 5.4 L 10 3 L 13 3 M 11 1 L 14 3 L 11 5"
+            : "M 1 6 L 1 5 Q 1 3 3 3 L 13 3 M 11 1 L 13 3 L 11 5 M 15 8 L 15 9 Q 15 11 13 11 L 3 11 M 5 9 L 3 11 L 5 13";
+        stroke: root.active ? Theme.accent : (ta.has-hover ? Theme.text : Theme.muted);
+        animate stroke { duration: 140ms; }
+        stroke-width: 1.6px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+    if root.badge != "": Label {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2 - 2px;
+        width: 8px;
+        text: root.badge;
+        color: Theme.accent;
+        font-size: 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        width: 4px;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.accent;
+        x: (parent.width - self.width) / 2;
+        y: parent.height - 8px;
+        opacity: root.active ? 1 : 0;
+        animate opacity { duration: 140ms; }
+    }
+}
+
+component IconButton inherits Rectangle {
+    in property <string> kind; // "prev" | "next"
+    callback clicked();
+    width: 36px;
+    height: 36px;
+    border-radius: 18px;
+    background: ta.pressed ? Theme.raised : (ta.has-hover ? Theme.hover : transparent);
+    animate background { duration: 120ms; }
+    ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.clicked(); } }
+    Path {
+        width: 14px;
+        height: 14px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        commands: root.kind == "prev"
+            ? "M 14 0 L 4 7 L 14 14 Z M 0 0 L 2.5 0 L 2.5 14 L 0 14 Z"
+            : "M 0 0 L 10 7 L 0 14 Z M 11.5 0 L 14 0 L 14 14 L 11.5 14 Z";
+        fill: ta.has-hover ? Theme.text : Theme.muted;
+        animate fill { duration: 120ms; }
+    }
+}
+
+component Pill inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: true;
+    callback clicked();
+    min-width: 64px;
+    height: 34px;
+    border-radius: 17px;
+    background: primary ? (ta.has-hover ? Theme.accent-hot : Theme.accent) : (ta.has-hover ? Theme.hover : Theme.raised);
+    animate background { duration: 120ms; }
+    // A plain pill has an edge, or it vanishes on a panel of the same colour.
+    border-width: primary ? 0px : 1px;
+    border-color: #3a3a42;
+    ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.clicked(); } }
+    HorizontalLayout {
+        padding-left: 18px;
+        padding-right: 18px;
+        Label {
+            text: root.text;
+            color: root.primary ? #1a1209 : Theme.text;
+            font-size: 16px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+/// A single-line text box with a hint, for the Jam page.
+component JamField inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> hint;
+    in property <bool> read-only: false;
+    callback accepted(string);
+    height: 40px;
+    border-radius: 8px;
+    background: Theme.raised;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : #3a3a42;
+    input := TextInput {
+        x: 12px;
+        width: parent.width - 24px;
+        height: parent.height;
+        color: Theme.text;
+        font-family: "Unifont Heavy";
+        font-size: 16px;
+        single-line: true;
+        read-only: root.read-only;
+        vertical-alignment: center;
+        accepted => { root.accepted(self.text); }
+    }
+    if input.text == "" && !input.has-focus: Label {
+        x: 12px;
+        text: root.hint;
+        color: Theme.muted;
+        font-size: 16px;
+        vertical-alignment: center;
+    }
+}
+
+/// A right a guest has: lit when given. A click flips it.
+component PermChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> on;
+    callback toggled(bool);
+    width: 84px;
+    height: 28px;
+    border-radius: 14px;
+    background: root.on ? Theme.accent : (ta.has-hover ? Theme.hover : Theme.raised);
+    animate background { duration: 120ms; }
+    ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.toggled(!root.on); } }
+    Label {
+        text: root.label;
+        color: root.on ? #1a1209 : Theme.muted;
+        font-size: 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+/// One row of the right-click menu.
+component MenuItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> danger: false;
+    callback clicked();
+    height: 34px;
+    border-radius: 6px;
+    background: ma.has-hover ? Theme.raised : transparent;
+    animate background { duration: 100ms; }
+    ma := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.clicked(); } }
+    Label {
+        x: 12px;
+        width: parent.width - 24px;
+        text: root.label;
+        color: root.danger ? Theme.danger : Theme.text;
+        font-size: 16px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+component SourceItem inherits Rectangle {
+    in property <string> label;
+    /// A pixel icon, drawn black on a light tile (black alone would vanish on the dark sidebar).
+    in property <image> icon;
+    in property <bool> has-icon: false;
+    /// Draw the icon in the accent colour straight on the row, with no tile behind it.
+    in property <bool> bare-icon: false;
+    /// Draw the icon in its own colours, a little larger, with no tile behind it.
+    in property <bool> full-color: false;
+    /// Playlists show a cover: the default art, covered by a collage of their songs once it exists.
+    in property <bool> playlist: false;
+    in property <image> cover;
+    in property <bool> active;
+    callback clicked();
+    /// Right button released; x and y are in window coordinates.
+    callback context(length, length);
+    height: root.playlist ? 48px : 36px;
+    border-radius: 8px;
+    background: root.active ? Theme.accent-dim : (ta.has-hover ? Theme.raised : transparent);
+    animate background { duration: 140ms; }
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.context(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+    Rectangle {
+        x: 0;
+        width: 3px;
+        height: root.active ? 18px : 0px;
+        animate height { duration: 160ms; easing: ease-out; }
+        y: (parent.height - self.height) / 2;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+    if root.playlist: Rectangle {
+        x: 8px;
+        y: (parent.height - self.height) / 2;
+        width: 36px;
+        height: 36px;
+        border-radius: 6px;
+        clip: true;
+        background: Theme.raised;
+        Image {
+            source: @image-url("../../../assets/icon/playlist-default-512.png");
+            width: parent.width;
+            height: parent.height;
+            image-rendering: pixelated;
+        }
+        Image {
+            source: root.cover;
+            width: parent.width;
+            height: parent.height;
+            opacity: root.cover.width > 0 ? 1 : 0;
+            animate opacity { duration: 300ms; easing: ease-out; }
+        }
+    }
+    if root.has-icon: Rectangle {
+        x: 10px;
+        y: (parent.height - self.height) / 2;
+        width: 26px;
+        height: 26px;
+        border-radius: 6px;
+        background: (root.bare-icon || root.full-color) ? transparent : (root.active ? Theme.accent : Theme.text);
+        animate background { duration: 140ms; }
+        Image {
+            source: root.icon;
+            width: root.full-color ? 32px : 22px;
+            height: root.full-color ? 32px : 22px;
+            x: root.full-color ? -3px : 2px;
+            y: root.full-color ? -3px : 2px;
+            image-rendering: pixelated;
+            colorize: root.bare-icon ? Theme.accent : transparent;
+        }
+    }
+    Label {
+        x: (root.has-icon || root.playlist) ? 52px : 14px;
+        width: parent.width - ((root.has-icon || root.playlist) ? 60px : 22px);
+        text: root.label;
+        color: root.active ? Theme.accent : Theme.text;
+        animate color { duration: 140ms; }
+        font-size: 16px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+/// Square cover. Shows a mark while hovered: pause while this song is playing, download when it
+/// is not saved yet, play otherwise. An accent ring marks the song that is loaded.
+component Cover inherits Rectangle {
+    in property <image> source;
+    in property <bool> hovered;
+    in property <bool> active;
+    /// Music is playing now. With `active`, the mark is pause.
+    in property <bool> playing;
+    /// The song is not on this computer yet: the mark is a download arrow, not play.
+    in property <bool> download;
+    in property <length> side: 44px;
+    width: root.side;
+    height: root.side;
+    border-radius: 6px;
+    clip: true;
+    background: Theme.raised;
+    Image { source: root.source; width: 100%; height: 100%; image-fit: cover; }
+    Rectangle {
+        background: #000000a8;
+        opacity: root.hovered ? 1 : 0;
+        animate opacity { duration: 120ms; }
+        Path {
+            visible: root.download;
+            width: 14px;
+            height: 14px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            commands: "M 7 0 L 7 9 M 2.5 5 L 7 9.5 L 11.5 5 M 1 13.5 L 13 13.5";
+            stroke: Theme.text;
+            stroke-width: 2px;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+        }
+        Path {
+            visible: !root.download && !(root.active && root.playing);
+            width: 12px;
+            height: 14px;
+            x: (parent.width - self.width) / 2 + 1px;
+            y: (parent.height - self.height) / 2;
+            commands: "M 0 0 L 12 7 L 0 14 Z";
+            fill: Theme.text;
+        }
+        Rectangle {
+            visible: !root.download && root.active && root.playing;
+            width: 4px;
+            height: 14px;
+            x: parent.width / 2 - 5px;
+            y: (parent.height - self.height) / 2;
+            background: Theme.text;
+        }
+        Rectangle {
+            visible: !root.download && root.active && root.playing;
+            width: 4px;
+            height: 14px;
+            x: parent.width / 2 + 1px;
+            y: (parent.height - self.height) / 2;
+            background: Theme.text;
+        }
+    }
+    Rectangle {
+        border-radius: 6px;
+        border-width: root.active ? 2px : 0px;
+        border-color: Theme.accent;
+        animate border-width { duration: 140ms; }
+    }
+}
+
+/// Click or drag to pick a position. `value` is 0..1. The bar thickens on hover.
+component SeekBar inherits Rectangle {
+    in property <float> value;
+    callback seek(float);
+    height: 16px;
+    private property <float> shown: ta.pressed ? clamp(ta.mouse-x / ta.width, 0, 1) : root.value;
+    ta := TouchArea { mouse-cursor: MouseCursor.pointer;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                root.seek(clamp(self.mouse-x / self.width, 0, 1));
+            }
+        }
+    }
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: (ta.has-hover || ta.pressed) ? 6px : 4px;
+        animate height { duration: 120ms; }
+        border-radius: 3px;
+        background: Theme.raised;
+        Rectangle {
+            x: 0;
+            width: parent.width * root.shown;
+            animate width { duration: ta.pressed ? 0ms : 1000ms; easing: linear; }
+            border-radius: 3px;
+            background: (ta.has-hover || ta.pressed) ? Theme.accent-hot : Theme.accent;
+        }
+        Rectangle {
+            width: 12px;
+            height: 12px;
+            border-radius: 6px;
+            background: Theme.text;
+            x: parent.width * root.shown - 6px;
+            animate x { duration: ta.pressed ? 0ms : 1000ms; easing: linear; }
+            y: (parent.height - self.height) / 2;
+            opacity: (ta.has-hover || ta.pressed) ? 1 : 0;
+            animate opacity { duration: 120ms; }
+        }
+    }
+}
+
+component VolumeBar inherits Rectangle {
+    in property <float> value;
+    callback changed(float);
+    height: 16px;
+    ta := TouchArea { mouse-cursor: MouseCursor.pointer;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                root.changed(clamp(self.mouse-x / self.width, 0, 1));
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.changed(clamp(self.mouse-x / self.width, 0, 1));
+            }
+        }
+    }
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: (ta.has-hover || ta.pressed) ? 6px : 4px;
+        animate height { duration: 120ms; }
+        border-radius: 3px;
+        background: Theme.raised;
+        Rectangle {
+            x: 0;
+            width: parent.width * root.value;
+            border-radius: 3px;
+            background: (ta.has-hover || ta.pressed) ? Theme.accent-hot : Theme.muted;
+            animate background { duration: 120ms; }
+        }
+        Rectangle {
+            width: 12px;
+            height: 12px;
+            border-radius: 6px;
+            background: Theme.text;
+            x: parent.width * root.value - 6px;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+}
+
+/// Placeholder row shown while a search runs. Pulses softly.
+component SkeletonRow inherits Rectangle {
+    in property <int> index;
+    height: 56px;
+    opacity: 0.45 + 0.25 * (Math.sin((animation-tick() / 450ms + root.index * 0.5) * 1rad) + 1) / 2;
+    HorizontalLayout {
+        padding-left: 24px;
+        padding-right: 24px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: 12px;
+        Rectangle { width: 44px; height: 44px; border-radius: 6px; background: Theme.raised; }
+        VerticalLayout {
+            alignment: center;
+            spacing: 8px;
+            Rectangle { height: 12px; width: 180px + mod(root.index * 47, 160) * 1px; border-radius: 6px; background: Theme.raised; }
+            Rectangle { height: 9px; width: 90px + mod(root.index * 31, 70) * 1px; border-radius: 5px; background: Theme.raised; }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "Meowtify";
+    icon: @image-url("../../../assets/icon/meowtify-orange-512.png");
+    preferred-width: 1120px;
+    preferred-height: 720px;
+    min-width: 760px;
+    min-height: 420px;
+    background: Theme.bg;
+    default-font-size: 16px;
+
+    in property <[Row]> rows;
+    in property <string> now-title;
+    in property <string> now-artist;
+    /// Path of the playing file, and its video id when it has one.
+    in-out property <string> now-uri;
+    in-out property <string> now-vid;
+    in property <image> now-art;
+    in property <string> elapsed: "0:00";
+    in property <string> total: "0:00";
+    in property <int> total-ms;
+    in-out property <bool> shuffle: false;
+    /// 0 = off, 1 = repeat the whole queue, 2 = repeat one track.
+    in-out property <int> repeat-mode: 0;
+    /// The animated logo's current frame. Empty until the first one is ready.
+    in property <image> mascot;
+    /// Discord presence: whether the setting is shown, and whether it is on.
+    in property <bool> discord-available: false;
+    in-out property <bool> discord: false;
+    /// Play a YouTube result while it is still downloading. Off until the user turns it on.
+    in-out property <bool> stream-playback: false;
+    in property <bool> autoplay-available: false;
+    in-out property <bool> autoplay: false;
+    in-out property <int> autoplay-ahead: 8;
+    in-out property <int> autoplay-behind: 3;
+    in-out property <string> lastfm-key: "";
+    in property <string> lastfm-note;
+    in property <bool> lastfm-bad: false;
+    /// The playing song sits in the autoplay cache, so it can be kept.
+    in-out property <bool> now-temp: false;
+    in-out property <bool> now-kept: false;
+    in property <[UpNext]> up-next;
+    /// The lyrics panel above the player bar.
+    in-out property <bool> lyrics-open: false;
+    in property <[LyricRow]> lyrics-rows;
+    /// True when the lines have times, so the panel follows the song and scrolls by itself.
+    in property <bool> lyrics-synced: false;
+    /// Index of the line being sung, or -1 before the first one.
+    in property <int> lyrics-current: -1;
+    /// What to say when there are no rows: looking, none found, no times.
+    in property <string> lyrics-note;
+    callback toggle-lyrics();
+    /// Autoplay is looking for songs: the queue panel says so while it has none to show.
+    in property <bool> autoplay-busy: false;
+    /// Height of the queue panel, and how far it is scrolled sideways.
+    out property <length> queue-panel-h: 82px;
+    /// 0 while the queue panel is hidden, 1 when shown; it eases between the two.
+    property <bool> queue-has: root.up-next.length > 0 || root.autoplay-busy;
+    /// False after the user folds the panel away; a small tab above the bar opens it again.
+    property <bool> queue-open: true;
+    property <float> queue-t: (root.queue-has && root.queue-open) ? 1 : 0;
+    animate queue-t { duration: 300ms; easing: ease-out; }
+    /// The same for the tab that shows while the panel is folded away.
+    property <float> tab-t: (root.queue-has && !root.queue-open) ? 1 : 0;
+    animate tab-t { duration: 300ms; easing: ease-out; }
+    /// Height of the player bar.
+    out property <length> bar-h: 96px;
+    in-out property <length> queue-scroll: 0px;
+    /// Proxy address text, and the answer after the user applies it.
+    in-out property <string> proxy: "";
+    in property <string> proxy-note;
+    in property <bool> proxy-bad: false;
+    in-out property <int> volume: 80;
+    in property <string> status;
+    in property <bool> playing;
+    in property <float> progress; // 0.0 ..= 1.0
+    in property <[string]> sources: ["All Songs"];
+    in property <bool> loading;
+    in-out property <int> current-source: 0;
+    /// True after a search: the main panel shows search results instead of the library.
+    in-out property <bool> show-results: false;
+    /// 0 = main panel, 1 = settings, 3 = downloads, 4 = jam.
+    in-out property <int> view: 0;
+    in property <string> library-path;
+    in-out property <string> tool-info;
+    in-out property <bool> tool-busy;
+    callback update-tools();
+    in property <string> library-info;
+    /// The build, shown as a footnote in the sidebar.
+    in property <string> app-version;
+    /// First run: no music folder yet. A welcome card asks for one.
+    in-out property <bool> onboarding-open: false;
+    in property <[ResultRow]> results;
+    in property <[JobRow]> jobs;
+    /// Sidebar queue: what is downloading, plus finished songs on their way out.
+    in property <[QueueRow]> queue;
+    /// Playlist covers, parallel to `sources` (empty image = none yet).
+    in property <[image]> source-art;
+    in property <bool> yt-busy;
+    /// More results are being fetched because the list was scrolled to its end.
+    in-out property <bool> more-busy: false;
+    callback load-more();
+    in property <string> yt-status;
+    in property <string> downloads-label: "Downloads";
+    /// Autocomplete: the list, the picked row (-1 = none) and the grey tail of the first entry.
+    in-out property <[string]> suggestions;
+    in-out property <int> suggest-index: -1;
+    in property <string> ghost;
+    in-out property <length> scroll-y <=> lv.content-y;
+
+    callback play-pause();
+    callback next();
+    callback previous();
+    callback seek(float);
+    callback set-volume(int);
+    callback set-discord(bool);
+    callback set-stream-playback(bool);
+    callback set-autoplay(bool);
+    callback set-autoplay-ahead(int);
+    callback set-autoplay-behind(int);
+    callback set-lastfm-key(string);
+    callback keep-now();
+    callback dislike-now();
+    callback set-proxy(string);
+    callback toggle-shuffle();
+    callback cycle-repeat();
+    callback row-clicked(int);
+    callback source-selected(int);
+    callback choose-folder();
+    /// Enter pressed: search now.
+    callback yt-search(string);
+    /// The text changed: search after a short pause. Empty text cancels.
+    callback query-edited(string);
+    /// The text changed: fetch suggestions for it. Empty text clears them.
+    callback suggest-request(string);
+    callback play-result(int);
+    /// The Install button on a result: save it to the library without playing it.
+    callback download-result(int);
+    /// The pointer rests on a result that is not saved yet: look it up ahead of a click.
+    callback result-hovered(int);
+    callback cancel-job(int);
+    callback clear-finished();
+
+    /// True while the main list shows a playlist (not All Songs).
+    in property <bool> viewing-playlist: false;
+    /// Right-click menu. kind: 0 library row, 1 search result, 2 sidebar playlist.
+    property <int> menu-kind: 0;
+    property <int> menu-idx: 0;
+    property <bool> menu-installed: false;
+    property <length> menu-x;
+    property <length> menu-y;
+    /// kind, row, action ("play", "next", "queue", "add", "new", "remove", "download", "rename", "delete"), extra.
+    callback ctx(int, int, string, int);
+    /// "Add to playlist" search: the box is open, the playlists that match the typed text, and
+    /// the callbacks for typing and for choosing one (its `index`, as `ctx` "add" takes it).
+    in-out property <bool> picker-open: false;
+    in property <[PickRow]> picker-rows;
+    callback picker-filter(string);
+    /// A song in the queue panel was clicked: play it now. The number is its place in `up-next`.
+    callback jump-to(int);
+    /// The menu opened for row `idx` of `kind`: the app notes which item that is, so the
+    /// action still hits it if the list changes while the menu is open.
+    callback menu-opened(int, int);
+    /// Name dialog for a new or renamed playlist.
+    in-out property <bool> name-open: false;
+    in property <string> name-title;
+    in property <string> name-initial;
+    /// The cover shown in the dialog (empty = the default art), and whether a chosen one is set.
+    in property <image> name-cover;
+    in property <bool> name-has-cover: false;
+    callback name-submitted(string);
+    /// Confirm dialog for deleting a song.
+    in-out property <bool> confirm-open: false;
+    in property <string> confirm-title;
+    in property <string> confirm-text;
+    callback confirm-accepted();
+    /// Jam page. jam-mode: 0 not in a jam, 1 hosting, 2 joined.
+    in-out property <int> jam-mode: 0;
+    in-out property <string> jam-status;
+    in-out property <string> jam-link;
+    in-out property <string> jam-relay;
+    in-out property <string> jam-name;
+    /// The user's cat, in the colour its name gives it.
+    in property <image> my-avatar;
+    /// The colour the user picked for the cat, as a hue in degrees. Negative: the name decides.
+    in-out property <int> jam-hue: -1;
+    in property <[JamSwatch]> jam-palette;
+    in-out property <string> jam-join-text;
+    /// A link that was opened from outside the app, waiting for the user to accept it.
+    in-out property <string> jam-invite;
+    in-out property <string> jam-rights;
+    in-out property <[JamMember]> jam-members;
+    in-out property <[string]> jam-suggestions;
+    callback jam-host();
+    callback jam-join(string);
+    callback jam-leave();
+    callback jam-copy();
+    callback jam-kick(int);
+    callback jam-perm(int, int, bool);
+    callback jam-suggest(string);
+    callback jam-set-relay(string);
+    callback jam-set-name(string);
+    in-out property <bool> jam-share-ip: false;
+    callback jam-set-share-ip(bool);
+    callback jam-set-hue(int);
+    callback jam-shuffle();
+    callback jam-accept-invite();
+    callback jam-dismiss-invite();
+    callback jam-search(int);
+    callback pick-cover();
+    callback clear-cover();
+    /// "Added" feedback: a toast over the player bar and a chip that flies into it.
+    in-out property <string> toast;
+    in-out property <bool> toast-on: false;
+    in-out property <bool> fly-on: false;
+    property <length> fly-x;
+    property <length> fly-y;
+    timer-fly := Timer { interval: 600ms; running: root.fly-on; triggered => { root.fly-on = false; } }
+
+    function open-menu(kind: int, idx: int, installed: bool, px: length, py: length) {
+        root.menu-kind = kind;
+        root.menu-idx = idx;
+        root.menu-installed = installed;
+        root.menu-opened(kind, idx);
+        root.menu-x = max(8px, min(px, root.width - 244px));
+        root.menu-y = max(8px, min(py, root.height - 120px - 34px * (root.sources.length + 2) - 8px));
+        ctx-menu.show();
+    }
+    /// A chip flies from (px, py) to the sidebar queue: a song was added to the downloads.
+    function fly-from(px: length, py: length) {
+        root.fly-x = px;
+        root.fly-y = py;
+        root.fly-on = true;
+    }
+
+    fs := FocusScope {
+        init => { self.focus(); }
+        key-pressed(e) => {
+            if (e.text == " ") {
+                root.play-pause();
+                return accept;
+            }
+            if (e.text == "/" || (e.modifiers.control && (e.text == "k" || e.text == "\u{b}"))) {
+                input.focus();
+                return accept;
+            }
+            if (e.text == Key.Escape) {
+                input.text = "";
+                root.show-results = false;
+                root.query-edited("");
+                root.suggest-request("");
+                fs.focus();
+                return accept;
+            }
+            if (e.text == "s") {
+                root.toggle-shuffle();
+                return accept;
+            }
+            if (e.text == "r") {
+                root.cycle-repeat();
+                return accept;
+            }
+            if (e.text == Key.LeftArrow) {
+                root.seek(clamp(root.progress - 5000.0 / max(root.total-ms, 1), 0, 1));
+                return accept;
+            }
+            if (e.text == Key.RightArrow) {
+                root.seek(clamp(root.progress + 5000.0 / max(root.total-ms, 1), 0, 1));
+                return accept;
+            }
+            reject
+        }
+
+    VerticalLayout {
+        HorizontalLayout {
+            vertical-stretch: 1;
+
+            // Sidebar: playlists, then Settings at the bottom.
+            Rectangle {
+                width: 232px;
+                background: Theme.panel;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 4px;
+                    HorizontalLayout {
+                        height: 44px;
+                        spacing: 10px;
+                        alignment: start;
+                        Image {
+                            source: root.mascot.width > 0 ? root.mascot : @image-url("../../../assets/icon/meowtify-orange-512.png");
+                            width: 36px;
+                            height: 36px;
+                            y: 4px;
+                            image-rendering: pixelated;
+                        }
+                        Label {
+                            text: "Meowtify";
+                            color: Theme.accent;
+                            font-size: 24px;
+                            font-weight: 800;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Label {
+                        text: "PLAYLISTS";
+                        color: Theme.muted;
+                        font-size: 16px;
+                        font-weight: 700;
+                        height: 28px;
+                        vertical-alignment: bottom;
+                    }
+                    for name[i] in root.sources: SourceItem {
+                        label: name;
+                        playlist: i > 0;
+                        cover: root.source-art[i];
+                        // All Songs gets the pixel music-list icon, like Settings has its gear.
+                        has-icon: i == 0;
+                        bare-icon: i == 0;
+                        icon: @image-url("../../../assets/icon/songs-pixel.png");
+                        context(x, y) => { if (i > 0) { root.open-menu(2, i - 1, true, x, y); } }
+                        active: root.view == 0 && i == root.current-source;
+                        clicked => {
+                            root.view = 0;
+                            root.show-results = false;
+                            root.current-source = i;
+                            root.source-selected(i);
+                        }
+                    }
+                    SourceItem {
+                        label: "+ New playlist";
+                        clicked => { root.ctx(2, -1, "new", -1); }
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                    // Queue: the downloads, newest first, four at most. A click opens them all.
+                    Rectangle { height: 1px; background: Theme.raised; }
+                    queue-label := Label {
+                        text: "QUEUE";
+                        color: root.fly-on ? Theme.accent : Theme.muted;
+                        animate color { duration: 260ms; }
+                        font-size: 16px;
+                        font-weight: 700;
+                        height: 32px;
+                        x: 0;
+                        vertical-alignment: center;
+                    }
+                    if root.queue.length == 0: Label {
+                        text: "Nothing queued";
+                        color: Theme.muted;
+                        font-size: 16px;
+                        height: 28px;
+                        vertical-alignment: center;
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        for j[idx] in root.queue: Rectangle {
+                            // Rows grow in when a song is queued and shrink away once it is saved.
+                            property <bool> shown: false;
+                            init => { self.shown = true; }
+                            height: (idx < 4 && self.shown && !j.leaving) ? 28px : 0px;
+                            animate height { duration: 260ms; easing: ease-out; }
+                            opacity: (self.shown && !j.leaving) ? 1 : 0;
+                            animate opacity { duration: 260ms; }
+                            visible: idx < 4;
+                            clip: true;
+                            border-radius: 6px;
+                            background: qa.has-hover ? Theme.raised : transparent;
+                            animate background { duration: 120ms; }
+                            qa := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.view = 3; } }
+                            Rectangle {
+                                x: j.leaving ? 36px : (parent.shown ? 0px : -28px);
+                                width: parent.width;
+                                animate x { duration: 260ms; easing: ease-out; }
+                                // The square fills from the bottom as the download proceeds. A tick shows when it is saved.
+                                Rectangle {
+                                    x: 8px;
+                                    y: 7px;
+                                    width: 14px;
+                                    height: 14px;
+                                    border-radius: 3px;
+                                    border-width: 2px;
+                                    border-color: j.failed ? #e5484d : Theme.accent;
+                                    background: transparent;
+                                    clip: true;
+                                    Rectangle {
+                                        y: parent.height * (1 - (j.active ? j.progress : (j.failed ? 0 : 1)));
+                                        height: parent.height - self.y;
+                                        animate y { duration: 200ms; }
+                                        background: j.failed ? #e5484d : Theme.accent;
+                                    }
+                                }
+                                Label {
+                                    x: 30px;
+                                    width: parent.width - 36px;
+                                    height: 28px;
+                                    text: j.title;
+                                    color: j.failed ? #e5484d : (j.active ? Theme.text : Theme.accent);
+                                    animate color { duration: 200ms; }
+                                    font-size: 16px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+                    Rectangle { height: 1px; background: Theme.raised; }
+                    SourceItem {
+                        label: root.jam-mode == 1 ? "Jam (hosting)" : (root.jam-mode == 2 ? "Jam (joined)" : "Jam");
+                        icon: @image-url("../../../assets/icon/jam.png");
+                        has-icon: true;
+                        full-color: true;
+                        active: root.view == 4;
+                        clicked => { root.view = 4; }
+                    }
+                    SourceItem {
+                        label: root.jam-name;
+                        icon: root.my-avatar;
+                        has-icon: true;
+                        full-color: true;
+                        active: false;
+                        clicked => { root.view = 4; }
+                    }
+                    SourceItem {
+                        label: "Settings";
+                        icon: @image-url("../../../assets/icon/settings-pixel.png");
+                        has-icon: true;
+                        active: root.view == 1;
+                        clicked => { root.view = 1; }
+                    }
+                    Label {
+                        text: root.app-version;
+                        color: Theme.muted;
+                        font-size: 12px;
+                        height: 18px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Main column, with the settings and downloads panes laid over it.
+            Rectangle {
+                horizontal-stretch: 1;
+                VerticalLayout {
+
+                // Search bar, centred.
+                Rectangle {
+                    height: 72px;
+                    Rectangle {
+                        width: min(560px, parent.width - 48px);
+                        height: 40px;
+                        x: (parent.width - self.width) / 2;
+                        y: 20px;
+                        border-radius: 20px;
+                        background: input.has-focus ? Theme.hover : Theme.raised;
+                        animate background { duration: 140ms; }
+                        border-width: 2px;
+                        border-color: input.has-focus ? Theme.accent : #3a3a42;
+                        animate border-color { duration: 140ms; }
+                        // Tab completes, Up and Down pick a suggestion. Captured before the text box sees them.
+                        FocusScope {
+                            x: 18px;
+                            width: parent.width - 36px - 96px;
+                            height: parent.height;
+                            capture-key-pressed(e) => {
+                                if (root.suggestions.length > 0) {
+                                    if (e.text == Key.Tab) {
+                                        input.text = root.suggestions[root.suggest-index < 0 ? 0 : root.suggest-index];
+                                        input.set-selection-offsets(input.text.character-count, input.text.character-count);
+                                        root.suggest-request(input.text);
+                                        return accept;
+                                    }
+                                    if (e.text == Key.DownArrow) {
+                                        root.suggest-index = Math.mod(root.suggest-index + 1, root.suggestions.length);
+                                        return accept;
+                                    }
+                                    if (e.text == Key.UpArrow) {
+                                        root.suggest-index = root.suggest-index <= 0 ? root.suggestions.length - 1 : root.suggest-index - 1;
+                                        return accept;
+                                    }
+                                }
+                                reject
+                            }
+                            input := TextInput {
+                                width: parent.width;
+                                height: parent.height;
+                                color: Theme.text;
+                                font-family: "Unifont Heavy";
+                                font-size: 16px;
+                                single-line: true;
+                                vertical-alignment: center;
+                                accepted => {
+                                    if (root.suggest-index >= 0 && root.suggest-index < root.suggestions.length) {
+                                        self.text = root.suggestions[root.suggest-index];
+                                    }
+                                    root.suggestions = [];
+                                    if (self.text != "") {
+                                        root.yt-search(self.text);
+                                    }
+                                    fs.focus();
+                                }
+                                edited => {
+                                    if (self.text == "") {
+                                        root.show-results = false;
+                                    }
+                                    root.query-edited(self.text);
+                                    root.suggest-request(self.text);
+                                }
+                            }
+                        }
+                        // Grey tail of the first suggestion, so Tab shows what it will do.
+                        Label {
+                            x: 18px + input.preferred-width;
+                            text: root.ghost;
+                            color: #6b6b75;
+                            font-size: 16px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            visible: input.has-focus && input.text != "" && root.suggest-index < 0;
+                        }
+                        Label {
+                            x: 18px;
+                            text: "Search for a song   ( / )";
+                            color: Theme.muted;
+                            font-size: 16px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            visible: input.text == "";
+                        }
+                        Label {
+                            x: parent.width - 96px - 14px;
+                            width: 96px;
+                            text: root.yt-busy ? "Searching…" : (root.loading ? "Loading…" : "");
+                            color: Theme.muted;
+                            font-size: 16px;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                            visible: input.text == "" || root.yt-busy || root.loading;
+                        }
+                        // Clear button.
+                        Rectangle {
+                            visible: input.text != "" && !root.yt-busy && !root.loading;
+                            x: parent.width - 32px;
+                            y: 8px;
+                            width: 24px;
+                            height: 24px;
+                            border-radius: 12px;
+                            background: clr.has-hover ? Theme.hover : transparent;
+                            animate background { duration: 120ms; }
+                            clr := TouchArea { mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    input.text = "";
+                                    root.show-results = false;
+                                    root.query-edited("");
+                                    root.suggest-request("");
+                                    input.focus();
+                                }
+                            }
+                            Path {
+                                width: 10px;
+                                height: 10px;
+                                x: 7px;
+                                y: 7px;
+                                commands: "M 0 0 L 10 10 M 10 0 L 0 10";
+                                stroke: Theme.muted;
+                                stroke-width: 1.6px;
+                            }
+                        }
+                    }
+                    // Export the open playlist as an .m3u8 file.
+                    if root.view == 0 && !root.show-results && root.current-source > 0: Pill {
+                        x: parent.width - self.width - 24px - (root.downloads-label != "Downloads" ? 150px : 0px);
+                        y: 20px;
+                        text: "Export";
+                        primary: false;
+                        clicked => {
+                            root.menu-opened(2, root.current-source - 1);
+                            root.ctx(2, root.current-source - 1, "export", 0);
+                        }
+                    }
+                    // Downloads shortcut, only while something is downloading.
+                    if root.downloads-label != "Downloads": Pill {
+                        x: parent.width - self.width - 24px;
+                        y: 20px;
+                        text: root.downloads-label;
+                        primary: false;
+                        clicked => { root.view = 3; }
+                    }
+                }
+
+                // Status line: search errors, "Nothing found".
+                if root.yt-status != "": Label {
+                    height: 22px;
+                    text: root.yt-status;
+                    color: Theme.accent;
+                    font-size: 16px;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+
+                // Column headers (library list only).
+                if !root.show-results: Rectangle {
+                    height: 28px;
+                    HorizontalLayout {
+                        padding-left: 24px;
+                        padding-right: 24px;
+                        spacing: 12px;
+                        Rectangle { width: 44px; }
+                        Label { text: "TITLE"; color: Theme.muted; font-size: 16px; font-weight: 700; horizontal-stretch: 2; preferred-width: 0px; horizontal-alignment: left; vertical-alignment: center; }
+                        Label { text: "ALBUM"; color: Theme.muted; font-size: 16px; font-weight: 700; horizontal-stretch: 1; preferred-width: 0px; horizontal-alignment: left; vertical-alignment: center; }
+                        Label { text: "TIME"; color: Theme.muted; font-size: 16px; font-weight: 700; width: 56px; horizontal-alignment: right; vertical-alignment: center; }
+                    }
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Theme.raised;
+                    }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+
+                    // Library list. Rows are built only while visible, so a huge library costs nothing.
+                    lv := ListView {
+                        visible: !root.show-results;
+                        width: 100%;
+                        height: 100%;
+                        for r[idx] in rows: Rectangle {
+                            height: 56px;
+                            background: ta.pressed ? Theme.raised : (ta.has-hover ? Theme.hover : transparent);
+                            animate background { duration: 100ms; }
+                            ta := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => { fs.focus(); if (r.key == root.now-uri) { root.play-pause(); } else { root.row-clicked(idx); } }
+                                pointer-event(e) => {
+                                    if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                                        root.open-menu(0, idx, true, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                padding-left: 24px;
+                                padding-right: 24px;
+                                padding-top: 6px;
+                                padding-bottom: 6px;
+                                spacing: 12px;
+                                Cover { source: r.art; hovered: ta.has-hover; active: r.key == root.now-uri; playing: root.playing; }
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 2;
+                                    preferred-width: 0px;
+                                    spacing: 2px;
+                                    Label { text: r.title; color: r.key == root.now-uri ? Theme.accent : Theme.text; font-size: 16px; font-weight: 600; overflow: elide; }
+                                    Label { text: r.artist; color: Theme.muted; font-size: 16px; overflow: elide; }
+                                }
+                                Label {
+                                    text: r.album;
+                                    color: Theme.muted;
+                                    font-size: 16px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: left;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                    preferred-width: 0px;
+                                }
+                                Label {
+                                    text: r.duration;
+                                    color: Theme.muted;
+                                    font-size: 16px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
+                                    width: 56px;
+                                }
+                            }
+                        }
+                    }
+
+                    // Empty library hint.
+                    if !root.show-results && root.rows.length == 0 && !root.loading: Label {
+                        text: "Search above to find a song. Click it to play.";
+                        color: Theme.muted;
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    // Search results. Rows fade in one after another.
+                    ListView {
+                        visible: root.show-results;
+                        width: 100%;
+                        height: 100%;
+                        // Near the end of the list, or the list is too short to scroll at all: ask for more.
+                        changed content-y => { if (self.content-height + self.content-y < self.visible-height + 280px) { root.load-more(); } }
+                        changed content-height => { if (self.content-height + self.content-y < self.visible-height + 280px) { root.load-more(); } }
+                        changed visible-height => { if (self.content-height + self.content-y < self.visible-height + 280px) { root.load-more(); } }
+                        for r[idx] in root.results: Rectangle {
+                            property <bool> shown: false;
+                            init => { self.shown = true; }
+                            opacity: self.shown ? 1 : 0;
+                            animate opacity { duration: 220ms; delay: min(idx, 10) * 24ms; easing: ease-out; }
+                            height: 56px;
+                            background: rta.pressed ? Theme.raised : (rta.has-hover ? Theme.hover : transparent);
+                            animate background { duration: 100ms; }
+                            rta := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                changed has-hover => { if (self.has-hover && r.state == "") { root.result-hovered(idx); } }
+                                clicked => {
+                                    fs.focus();
+                                    if (r.key == root.now-vid) {
+                                        root.play-pause();
+                                    } else {
+                                        if (r.state == "") { root.fly-from(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y); }
+                                        root.play-result(idx);
+                                    }
+                                }
+                                pointer-event(e) => {
+                                    if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                                        root.open-menu(1, idx, r.state == "In library", self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                padding-left: 24px;
+                                padding-right: 24px;
+                                padding-top: 6px;
+                                padding-bottom: 6px;
+                                spacing: 12px;
+                                Cover { source: r.art; hovered: rta.has-hover; active: r.key == root.now-vid; playing: root.playing; download: r.state == ""; }
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    preferred-width: 0px;
+                                    spacing: 2px;
+                                    Label { text: r.title; color: r.key == root.now-vid ? Theme.accent : Theme.text; font-size: 16px; font-weight: 600; overflow: elide; }
+                                    Label { text: r.subtitle; color: Theme.muted; font-size: 16px; overflow: elide; }
+                                }
+                                Rectangle {
+                                    width: 84px;
+                                    // Shown while hovering a song that is not saved yet.
+                                    property <bool> can: r.state == "";
+                                    opacity: can && (rta.has-hover || inst-ta.has-hover) ? 1 : 0;
+                                    animate opacity { duration: 120ms; }
+                                    Rectangle {
+                                        height: 30px;
+                                        y: (parent.height - self.height) / 2;
+                                        border-radius: 15px;
+                                        border-width: 2px;
+                                        border-color: Theme.accent;
+                                        background: inst-ta.pressed ? Theme.accent : (inst-ta.has-hover ? Theme.accent-dim : transparent);
+                                        animate background { duration: 100ms; }
+                                        Label {
+                                            text: "Install";
+                                            color: inst-ta.pressed ? #1a1209 : Theme.accent;
+                                            font-size: 16px;
+                                            font-weight: 700;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    inst-ta := TouchArea {
+                                        enabled: parent.can;
+                                        mouse-cursor: MouseCursor.pointer;
+                                        changed has-hover => { if (self.has-hover && parent.can) { root.result-hovered(idx); } }
+                                        clicked => { root.fly-from(self.absolute-position.x + 40px, self.absolute-position.y + 8px); root.download-result(idx); }
+                                    }
+                                }
+                                Label {
+                                    text: r.state != "" ? r.state : (rta.has-hover ? "Play" : "");
+                                    color: r.state == "Failed" ? Theme.danger : (r.state == "" ? Theme.accent : Theme.muted);
+                                    font-size: 16px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
+                                    width: 96px;
+                                }
+                            }
+                        }
+                    }
+
+                    if root.show-results && root.more-busy: Rectangle {
+                        y: parent.height - 36px;
+                        height: 36px;
+                        background: Theme.bg;
+                        Label { text: "Loading more\u{2026}"; color: Theme.muted; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+
+                    // Skeleton rows while a search runs. They cover the old results.
+                    if root.show-results && root.yt-busy: Rectangle {
+                        background: Theme.bg;
+                        VerticalLayout {
+                            alignment: start;
+                            for i in 9: SkeletonRow { index: i; }
+                        }
+                    }
+                }
+            }
+
+                // Suggestions under the search bar.
+                if input.has-focus && root.suggestions.length > 0 && root.view == 0: Rectangle {
+                    width: min(560px, parent.width - 48px);
+                    height: root.suggestions.length * 38px + 12px;
+                    x: (parent.width - self.width) / 2;
+                    y: 64px;
+                    border-radius: 14px;
+                    background: Theme.raised;
+                    border-width: 2px;
+                    border-color: #3a3a42;
+                    drop-shadow-blur: 18px;
+                    drop-shadow-color: #000000a0;
+                    drop-shadow-offset-y: 6px;
+                    VerticalLayout {
+                        padding: 6px;
+                        for sug[i] in root.suggestions: Rectangle {
+                            height: 38px;
+                            border-radius: 8px;
+                            background: i == root.suggest-index ? Theme.accent-dim : (sta.has-hover ? Theme.hover : transparent);
+                            animate background { duration: 100ms; }
+                            sta := TouchArea { mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    input.text = sug;
+                                    root.suggestions = [];
+                                    root.yt-search(sug);
+                                    fs.focus();
+                                }
+                            }
+                            Label {
+                                x: 14px;
+                                width: parent.width - 28px;
+                                text: sug;
+                                color: i == root.suggest-index ? Theme.accent : Theme.text;
+                                font-size: 16px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+
+                // Settings pane (covers the list while open).
+                Rectangle {
+                    opacity: root.view == 1 ? 1 : 0;
+                    animate opacity { duration: 160ms; easing: ease-out; }
+                    visible: root.view == 1 || self.opacity > 0.01;
+                    width: 100%;
+                    height: 100%;
+                    background: Theme.bg;
+                    TouchArea { }
+                    VerticalLayout {
+                        padding: 32px;
+                        spacing: 8px;
+                        alignment: start;
+                        Label { text: "Settings"; color: Theme.text; font-size: 24px; font-weight: 800; height: 44px; }
+                        Label { text: "MUSIC FOLDER"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 28px; vertical-alignment: bottom; }
+                        Rectangle {
+                            height: 44px;
+                            border-radius: 8px;
+                            background: Theme.raised;
+                            Label {
+                                x: 14px;
+                                width: parent.width - 28px;
+                                text: root.library-path != "" ? root.library-path : "No folder chosen";
+                                color: root.library-path != "" ? Theme.text : Theme.muted;
+                                font-size: 16px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                        Rectangle {
+                            height: 8px;
+                        }
+                        HorizontalLayout {
+                            height: 40px;
+                            alignment: start;
+                            spacing: 12px;
+                            Rectangle {
+                                width: 160px;
+                                border-radius: 20px;
+                                background: cf.has-hover ? #ffa24d : Theme.accent;
+                                cf := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.choose-folder(); } }
+                                Label {
+                                    text: "Choose folder…";
+                                    color: #1a1209;
+                                    font-size: 16px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Label {
+                                text: root.library-info;
+                                color: Theme.muted;
+                                font-size: 16px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Label {
+                            text: "Meowtify reads music from this folder and saves downloads into it.";
+                            color: Theme.muted;
+                            font-size: 16px;
+                            wrap: word-wrap;
+                        }
+                        Label { text: "DOWNLOADER"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
+                        HorizontalLayout {
+                            height: 40px;
+                            alignment: start;
+                            spacing: 12px;
+                            visible: root.tool-info != "";
+                            Rectangle {
+                                width: 160px;
+                                border-radius: 20px;
+                                background: root.tool-busy ? Theme.raised : (ut.has-hover ? #ffa24d : Theme.accent);
+                                ut := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.update-tools(); } }
+                                Label {
+                                    text: "Update yt-dlp";
+                                    color: root.tool-busy ? Theme.muted : #1a1209;
+                                    font-size: 16px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Label {
+                                text: root.tool-info;
+                                color: Theme.muted;
+                                font-size: 16px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Label {
+                            text: "YouTube changes often. If downloads fail with \"not available on this app\", update.";
+                            color: Theme.muted;
+                            font-size: 16px;
+                            wrap: word-wrap;
+                        }
+                        if root.discord-available: Label { text: "DISCORD"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
+                        if root.discord-available: HorizontalLayout {
+                            height: 36px;
+                            spacing: 12px;
+                            alignment: start;
+                            Rectangle {
+                                width: 44px;
+                                height: 24px;
+                                y: 6px;
+                                border-radius: 12px;
+                                background: root.discord ? Theme.accent : Theme.raised;
+                                animate background { duration: 160ms; }
+                                Rectangle {
+                                    width: 18px;
+                                    height: 18px;
+                                    y: 3px;
+                                    x: root.discord ? 23px : 3px;
+                                    animate x { duration: 160ms; easing: ease-out; }
+                                    border-radius: 9px;
+                                    background: root.discord ? #1a1209 : Theme.muted;
+                                }
+                                TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => { root.discord = !root.discord; root.set-discord(root.discord); }
+                                }
+                            }
+                            Label { text: "Show what I am playing on Discord"; color: Theme.text; font-size: 16px; vertical-alignment: center; }
+                        }
+                        Label { text: "PLAYBACK"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
+                        HorizontalLayout {
+                            height: 36px;
+                            spacing: 12px;
+                            alignment: start;
+                            Rectangle {
+                                width: 44px;
+                                height: 24px;
+                                y: 6px;
+                                border-radius: 12px;
+                                background: root.stream-playback ? Theme.accent : Theme.raised;
+                                animate background { duration: 160ms; }
+                                Rectangle {
+                                    width: 18px;
+                                    height: 18px;
+                                    y: 3px;
+                                    x: root.stream-playback ? 23px : 3px;
+                                    animate x { duration: 160ms; easing: ease-out; }
+                                    border-radius: 9px;
+                                    background: root.stream-playback ? #1a1209 : Theme.muted;
+                                }
+                                TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => { root.stream-playback = !root.stream-playback; root.set-stream-playback(root.stream-playback); }
+                                }
+                            }
+                            Label { text: "Start playing while a song downloads"; color: Theme.text; font-size: 16px; vertical-alignment: center; }
+                        }
+                        if root.autoplay-available: HorizontalLayout {
+                            height: 36px;
+                            spacing: 12px;
+                            alignment: start;
+                            Rectangle {
+                                width: 44px;
+                                height: 24px;
+                                y: 6px;
+                                border-radius: 12px;
+                                background: root.autoplay ? Theme.accent : Theme.raised;
+                                animate background { duration: 160ms; }
+                                Rectangle {
+                                    width: 18px;
+                                    height: 18px;
+                                    y: 3px;
+                                    x: root.autoplay ? 23px : 3px;
+                                    animate x { duration: 160ms; easing: ease-out; }
+                                    border-radius: 9px;
+                                    background: root.autoplay ? #1a1209 : Theme.muted;
+                                }
+                                TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => { root.autoplay = !root.autoplay; root.set-autoplay(root.autoplay); }
+                                }
+                            }
+                            Label { text: "Autoplay: keep playing similar songs"; color: Theme.text; font-size: 16px; vertical-alignment: center; }
+                        }
+                        if root.autoplay-available: Label {
+                            text: "A song you pick plays alone, then similar songs from YouTube Music and Deezer follow. They download ahead while you listen, into a cache folder, not your library.";
+                            color: Theme.muted;
+                            font-size: 16px;
+                            wrap: word-wrap;
+                        }
+                        if root.autoplay-available: Stepper {
+                            label: "songs ready ahead";
+                            min: 2;
+                            max: 30;
+                            value <=> root.autoplay-ahead;
+                            changed(v) => { root.set-autoplay-ahead(v); }
+                        }
+                        if root.autoplay-available: Stepper {
+                            label: "played songs kept, then deleted";
+                            min: 0;
+                            max: 20;
+                            value <=> root.autoplay-behind;
+                            changed(v) => { root.set-autoplay-behind(v); }
+                        }
+                        if root.autoplay-available: Rectangle {
+                            height: 40px;
+                            border-radius: 8px;
+                            background: Theme.raised;
+                            border-width: 1px;
+                            border-color: root.lastfm-bad ? Theme.danger : (lastfm-input.has-focus ? Theme.accent : #3a3a42);
+                            lastfm-input := TextInput {
+                                x: 12px;
+                                width: parent.width - 24px;
+                                height: parent.height;
+                                color: Theme.text;
+                                font-family: "Unifont Heavy";
+                                font-size: 16px;
+                                single-line: true;
+                                vertical-alignment: center;
+                                text <=> root.lastfm-key;
+                                accepted => { root.set-lastfm-key(self.text); }
+                            }
+                            if lastfm-input.text == "" && !lastfm-input.has-focus: Label {
+                                x: 12px;
+                                text: "Last.fm API key (optional)";
+                                color: Theme.muted;
+                                font-size: 16px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if root.autoplay-available: Label {
+                            text: root.lastfm-note != "" ? root.lastfm-note : "Press Enter to apply. A free key from last.fm/api/account/create adds Last.fm to the suggestions.";
+                            color: root.lastfm-bad ? Theme.danger : Theme.muted;
+                            font-size: 16px;
+                            wrap: word-wrap;
+                        }
+                        Label { text: "NETWORK"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
+                        Rectangle {
+                            height: 40px;
+                            border-radius: 8px;
+                            background: Theme.raised;
+                            border-width: 1px;
+                            border-color: root.proxy-bad ? Theme.danger : (proxy-input.has-focus ? Theme.accent : #3a3a42);
+                            proxy-input := TextInput {
+                                x: 12px;
+                                width: parent.width - 24px;
+                                height: parent.height;
+                                color: Theme.text;
+                                font-family: "Unifont Heavy";
+                                font-size: 16px;
+                                single-line: true;
+                                vertical-alignment: center;
+                                text <=> root.proxy;
+                                accepted => { root.set-proxy(self.text); }
+                            }
+                            if proxy-input.text == "" && !proxy-input.has-focus: Label {
+                                x: 12px;
+                                text: "Proxy, such as http://127.0.0.1:8080 (empty: none)";
+                                color: Theme.muted;
+                                font-size: 16px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Label {
+                            text: root.proxy-note != "" ? root.proxy-note : "Press Enter to apply. Used by yt-dlp, downloads, search and covers.";
+                            color: root.proxy-bad ? Theme.danger : Theme.muted;
+                            font-size: 16px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+
+                // Jam pane.
+                Rectangle {
+                    opacity: root.view == 4 ? 1 : 0;
+                    animate opacity { duration: 160ms; easing: ease-out; }
+                    visible: root.view == 4 || self.opacity > 0.01;
+                    width: 100%;
+                    height: 100%;
+                    background: Theme.bg;
+                    TouchArea { }
+                    VerticalLayout {
+                        padding: 32px;
+                        spacing: 8px;
+                        alignment: start;
+                        Label { text: "Jam"; color: Theme.text; font-size: 24px; font-weight: 800; height: 44px; }
+                        // The pseudo profile: a name and the cat it gives you.
+                        Rectangle {
+                            height: 76px;
+                            border-radius: 8px;
+                            background: Theme.raised;
+                            Image {
+                                x: 12px;
+                                y: 6px;
+                                width: 64px;
+                                height: 64px;
+                                source: root.my-avatar;
+                                image-rendering: pixelated;
+                            }
+                            JamField {
+                                x: 92px;
+                                y: 18px;
+                                width: parent.width - 92px - 128px;
+                                text <=> root.jam-name;
+                                hint: "Your name";
+                                accepted(t) => { root.jam-set-name(t); }
+                            }
+                            Pill {
+                                x: parent.width - 116px;
+                                y: 21px;
+                                text: "Shuffle";
+                                primary: false;
+                                clicked => { root.jam-shuffle(); }
+                            }
+                        }
+                        Label { text: "CAT COLOUR"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
+                        HorizontalLayout {
+                            height: 34px;
+                            spacing: 8px;
+                            alignment: start;
+                            Pill { text: "Auto"; primary: root.jam-hue < 0; clicked => { root.jam-set-hue(-1); } }
+                            for sw in root.jam-palette: Rectangle {
+                                width: 34px;
+                                height: 34px;
+                                border-radius: 17px;
+                                background: sw.color;
+                                border-width: root.jam-hue == sw.hue ? 3px : (sa.has-hover ? 2px : 0px);
+                                border-color: Theme.text;
+                                sa := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.jam-set-hue(sw.hue); } }
+                            }
+                        }
+                        Label { text: "PRIVACY"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
+                        HorizontalLayout {
+                            height: 34px;
+                            spacing: 12px;
+                            alignment: start;
+                            PermChip { label: root.jam-share-ip ? "Share" : "Hidden"; on: !root.jam-share-ip; toggled(on) => { root.jam-set-share-ip(!on); } }
+                            Label {
+                                text: root.jam-share-ip ? "People in the jam can see your IP address, and audio flows straight to them." : "People in the jam cannot see your IP address. The relay's owner can.";
+                                color: Theme.muted;
+                                font-size: 16px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                        if root.jam-invite != "": Rectangle {
+                            height: 96px;
+                            border-radius: 8px;
+                            background: Theme.accent-dim;
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 8px;
+                                Label { text: root.jam-invite; color: Theme.text; font-size: 16px; wrap: word-wrap; vertical-stretch: 1; }
+                                HorizontalLayout {
+                                    height: 34px;
+                                    spacing: 12px;
+                                    alignment: start;
+                                    Pill { text: "Join"; clicked => { root.jam-accept-invite(); } }
+                                    Pill { text: "Dismiss"; primary: false; clicked => { root.jam-dismiss-invite(); } }
+                                }
+                            }
+                        }
+                        if root.jam-mode == 0: VerticalLayout {
+                            spacing: 14px;
+                            Label { text: "HOST A JAM"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 28px; vertical-alignment: bottom; }
+                            JamField {
+                                text <=> root.jam-relay;
+                                hint: "Relay address, such as wss://jam.example.com";
+                                accepted(t) => { root.jam-set-relay(t); }
+                            }
+                            HorizontalLayout {
+                                height: 34px;
+                                alignment: start;
+                                Pill { text: "Start a jam"; clicked => { root.jam-host(); } }
+                            }
+                            Label {
+                                text: root.jam-status != "" ? root.jam-status : "Starting a jam sends the songs you play to the people you invite. The relay only introduces people; songs go straight from you to them.";
+                                color: Theme.muted;
+                                font-size: 16px;
+                                wrap: word-wrap;
+                            }
+                            Label { text: "JOIN A JAM"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
+                            JamField {
+                                text <=> root.jam-join-text;
+                                hint: "Paste a meowtify://jam/… link and press Enter";
+                                accepted(t) => { root.jam-join(t); }
+                            }
+                        }
+                        if root.jam-mode != 0: VerticalLayout {
+                            spacing: 8px;
+                            Label {
+                                text: root.jam-status;
+                                color: Theme.text;
+                                font-size: 16px;
+                                wrap: word-wrap;
+                            }
+                            if root.jam-mode == 1: HorizontalLayout {
+                                height: 40px;
+                                spacing: 12px;
+                                JamField { horizontal-stretch: 1; text: root.jam-link; read-only: true; }
+                                Pill { text: "Copy link"; clicked => { root.jam-copy(); } }
+                            }
+                            if root.jam-mode == 2: Label {
+                                text: root.jam-rights;
+                                color: Theme.muted;
+                                font-size: 16px;
+                                wrap: word-wrap;
+                            }
+                            if root.jam-mode == 2: JamField {
+                                hint: "Suggest a song to the host and press Enter";
+                                accepted(t) => { root.jam-suggest(t); self.text = ""; }
+                            }
+                            HorizontalLayout {
+                                height: 34px;
+                                alignment: start;
+                                Pill { text: root.jam-mode == 1 ? "End jam" : "Leave"; primary: false; clicked => { root.jam-leave(); } }
+                            }
+                            Label { text: "PEOPLE"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
+                            for m[idx] in root.jam-members: Rectangle {
+                                height: 36px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Image { source: m.avatar; width: 32px; height: 32px; y: 2px; image-rendering: pixelated; }
+                                    Label {
+                                        text: m.name + (m.host ? " (host)" : "");
+                                        color: Theme.text;
+                                        font-size: 16px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                        preferred-width: 0px;
+                                    }
+                                    Label { text: m.state; color: Theme.muted; font-size: 16px; vertical-alignment: center; }
+                                    if root.jam-mode == 1 && !m.host: PermChip { label: "Control"; on: m.control; y: 4px; toggled(on) => { root.jam-perm(m.id, 0, on); } }
+                                    if root.jam-mode == 1 && !m.host: PermChip { label: "Skip"; on: m.skip; y: 4px; toggled(on) => { root.jam-perm(m.id, 1, on); } }
+                                    if root.jam-mode == 1 && !m.host: PermChip { label: "Add"; on: m.add; y: 4px; toggled(on) => { root.jam-perm(m.id, 2, on); } }
+                                    if root.jam-mode == 1 && !m.host: Pill { text: "Remove"; primary: false; clicked => { root.jam-kick(m.id); } }
+                                }
+                            }
+                            if root.jam-mode == 1 && root.jam-suggestions.length > 0: Label { text: "SUGGESTIONS"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
+                            if root.jam-mode == 1: VerticalLayout {
+                                for sug[idx] in root.jam-suggestions: Rectangle {
+                                    height: 38px;
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        Label { text: sug; color: Theme.text; font-size: 16px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; preferred-width: 0px; }
+                                        Pill { text: "Search"; clicked => { root.jam-search(idx); } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Downloads pane.
+                Rectangle {
+                    opacity: root.view == 3 ? 1 : 0;
+                    animate opacity { duration: 160ms; easing: ease-out; }
+                    visible: root.view == 3 || self.opacity > 0.01;
+                    width: 100%;
+                    height: 100%;
+                    background: Theme.bg;
+                    TouchArea { }
+                    VerticalLayout {
+                        Rectangle {
+                            height: 64px;
+                            HorizontalLayout {
+                                padding-left: 24px;
+                                padding-right: 24px;
+                                padding-top: 16px;
+                                padding-bottom: 16px;
+                                spacing: 12px;
+                                Pill { text: "Back"; primary: false; clicked => { root.view = 0; } }
+                                Label { text: "Downloads"; color: Theme.text; font-size: 24px; font-weight: 800; vertical-alignment: center; horizontal-stretch: 1; }
+                                Pill { text: "Clear finished"; primary: false; clicked => { root.clear-finished(); } }
+                            }
+                        }
+                        ListView {
+                            vertical-stretch: 1;
+                            for j[idx] in root.jobs: Rectangle {
+                                height: 64px;
+                                HorizontalLayout {
+                                    padding-left: 24px;
+                                    padding-right: 24px;
+                                    padding-top: 8px;
+                                    padding-bottom: 8px;
+                                    spacing: 12px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        horizontal-stretch: 1;
+                                        preferred-width: 0px;
+                                        spacing: 4px;
+                                        Label { text: j.title; color: Theme.text; font-size: 16px; font-weight: 600; overflow: elide; }
+                                        Rectangle {
+                                            height: 4px;
+                                            border-radius: 2px;
+                                            background: Theme.raised;
+                                            Rectangle {
+                                                x: 0;
+                                                width: parent.width * j.progress;
+                                                border-radius: 2px;
+                                                background: j.failed ? #e5484d : Theme.accent;
+                                            }
+                                        }
+                                        Label { text: j.status; color: j.failed ? #e5484d : Theme.muted; font-size: 16px; overflow: elide; }
+                                    }
+                                    if j.active: Pill {
+                                        text: "Cancel";
+                                        primary: false;
+                                        clicked => { root.cancel-job(idx); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Now-playing bar.
+        Rectangle {
+            height: root.bar-h;
+            background: Theme.panel;
+            Rectangle { y: 0; height: 1px; background: Theme.raised; }
+            bar := Rectangle {
+                property <length> mid: max(260px, min(560px, self.width - 520px));
+                property <length> side: (self.width - self.mid) / 2;
+
+                // Left: cover and names.
+                HorizontalLayout {
+                    x: 20px;
+                    y: 10px;
+                    width: bar.side - 36px;
+                    height: bar.height - 20px;
+                    spacing: 12px;
+                    alignment: start;
+                    if root.now-title != "": Cover {
+                        side: 60px;
+                        source: root.now-art;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        spacing: 2px;
+                        Label {
+                            text: root.now-title != "" ? root.now-title : "Nothing playing";
+                            color: Theme.text;
+                            font-size: 16px;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+                        Label {
+                            text: root.status != "" ? root.status : root.now-artist;
+                            color: root.status != "" ? Theme.accent : Theme.muted;
+                            font-size: 16px;
+                            overflow: elide;
+                        }
+                    }
+                    if root.now-temp: VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 64px;
+                            height: 28px;
+                            border-radius: 14px;
+                            background: root.now-kept ? transparent : (keep-ta.has-hover ? Theme.accent-hot : Theme.accent);
+                            border-width: root.now-kept ? 1px : 0px;
+                            border-color: Theme.muted;
+                            Label {
+                                text: root.now-kept ? "Kept" : "Keep";
+                                color: root.now-kept ? Theme.muted : #1a1209;
+                                font-size: 16px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            keep-ta := TouchArea {
+                                enabled: !root.now-kept;
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => { root.keep-now(); }
+                            }
+                        }
+                    }
+                    if root.now-temp: VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 84px;
+                            height: 28px;
+                            border-radius: 14px;
+                            background: transparent;
+                            border-width: 1px;
+                            border-color: dislike-ta.has-hover ? Theme.danger : Theme.muted;
+                            Label {
+                                text: "Dislike";
+                                color: dislike-ta.has-hover ? Theme.danger : Theme.muted;
+                                font-size: 14px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            dislike-ta := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => { root.dislike-now(); }
+                            }
+                        }
+                    }
+                }
+
+                // Centre: transport and seek bar.
+                VerticalLayout {
+                    x: bar.side;
+                    y: 12px;
+                    width: bar.mid;
+                    height: bar.height - 16px;
+                    alignment: start;
+                    spacing: 9px;
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 10px;
+                        height: 44px;
+                        ToggleIcon { kind: "shuffle"; active: root.shuffle; clicked => { root.toggle-shuffle(); } }
+                        IconButton { kind: "prev"; clicked => { root.previous(); } }
+                        Rectangle {
+                            // Fixed size, so the buttons beside it never move. Only the colour changes.
+                            width: 44px;
+                            height: 44px;
+                            border-radius: 22px;
+                            background: pp.pressed ? Theme.accent : (pp.has-hover ? Theme.accent-hot : Theme.accent);
+                            opacity: pp.pressed ? 0.85 : 1;
+                            animate background { duration: 180ms; easing: ease-out; }
+                            animate opacity { duration: 120ms; }
+                            pp := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.play-pause(); } }
+                            Path {
+                                visible: !root.playing;
+                                width: 14px;
+                                height: 16px;
+                                x: (parent.width - self.width) / 2 + 1px;
+                                y: (parent.height - self.height) / 2;
+                                commands: "M 0 0 L 14 8 L 0 16 Z";
+                                fill: #1a1209;
+                            }
+                            Rectangle {
+                                visible: root.playing;
+                                width: 4px;
+                                height: 16px;
+                                x: parent.width / 2 - 6px;
+                                y: (parent.height - self.height) / 2;
+                                background: #1a1209;
+                            }
+                            Rectangle {
+                                visible: root.playing;
+                                width: 4px;
+                                height: 16px;
+                                x: parent.width / 2 + 2px;
+                                y: (parent.height - self.height) / 2;
+                                background: #1a1209;
+                            }
+                        }
+                        IconButton { kind: "next"; clicked => { root.next(); } }
+                        ToggleIcon {
+                            kind: "repeat";
+                            active: root.repeat-mode != 0;
+                            badge: root.repeat-mode == 2 ? "1" : "";
+                            clicked => { root.cycle-repeat(); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        padding-left: 24px;
+                        padding-right: 24px;
+                        Label { text: root.elapsed; color: Theme.muted; font-size: 16px; width: 40px; horizontal-alignment: right; vertical-alignment: center; }
+                        SeekBar {
+                            value: root.progress;
+                            horizontal-stretch: 1;
+                            seek(f) => { root.seek(f); }
+                        }
+                        Label { text: root.total; color: Theme.muted; font-size: 16px; width: 40px; horizontal-alignment: left; vertical-alignment: center; }
+                    }
+                }
+
+                // Right: volume.
+                VerticalLayout {
+                    x: bar.width - bar.side + 16px;
+                    y: 10px;
+                    width: bar.side - 36px;
+                    height: bar.height - 20px;
+                    alignment: center;
+                    spacing: 8px;
+                    HorizontalLayout {
+                        alignment: end;
+                        height: 24px;
+                        Rectangle {
+                            width: 76px;
+                            border-radius: 12px;
+                            border-width: 1px;
+                            border-color: root.lyrics-open ? Theme.accent : (lyr-ta.has-hover ? Theme.text : Theme.muted);
+                            background: root.lyrics-open ? Theme.accent-dim : transparent;
+                            animate background { duration: 120ms; }
+                            Label {
+                                text: "Lyrics";
+                                color: root.lyrics-open ? Theme.accent : Theme.muted;
+                                font-size: 14px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            lyr-ta := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => { root.toggle-lyrics(); }
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 10px;
+                        height: 24px;
+                        Rectangle {
+                            width: 16px;
+                            Path {
+                                width: 16px;
+                                height: 14px;
+                                y: (parent.height - self.height) / 2;
+                                viewbox-width: 16;
+                                viewbox-height: 14;
+                                commands: "M 0 4 L 4 4 L 9 0 L 9 14 L 4 10 L 0 10 Z";
+                                fill: Theme.muted;
+                            }
+                        }
+                        VolumeBar {
+                            width: 110px;
+                            height: 24px;
+                            value: root.volume / 100.0;
+                            changed(f) => { root.volume = Math.round(f * 100); root.set-volume(root.volume); }
+                        }
+                        Label {
+                            text: "\{root.volume}%";
+                            color: Theme.muted;
+                            font-size: 16px;
+                            font-weight: 600;
+                            width: 44px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    }
+
+    // Right-click menu.
+    ctx-menu := PopupWindow {
+        x: root.menu-x;
+        y: root.menu-y;
+        width: 236px;
+        height: mcol.preferred-height + 16px;
+        Rectangle {
+            background: Theme.panel;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: #3a3a42;
+            mcol := VerticalLayout {
+                padding: 8px;
+                spacing: 2px;
+                if root.menu-kind == 2: MenuItem { label: "Edit\u{2026}"; clicked => { root.ctx(2, root.menu-idx, "rename", 0); } }
+                if root.menu-kind == 2: MenuItem { label: "Export\u{2026}"; clicked => { root.ctx(2, root.menu-idx, "export", 0); } }
+                if root.menu-kind == 2: MenuItem { label: "Delete playlist"; danger: true; clicked => { root.ctx(2, root.menu-idx, "delete", 0); } }
+                if root.menu-kind != 2: MenuItem { label: "Play"; clicked => { root.ctx(root.menu-kind, root.menu-idx, "play", 0); } }
+                if root.menu-kind == 1 && !root.menu-installed: MenuItem { label: "Download"; clicked => { root.fly-from(root.menu-x + 16px, root.menu-y + 16px); root.ctx(1, root.menu-idx, "download", 0); } }
+                if root.menu-kind != 2 && root.menu-installed: MenuItem { label: "Play next"; clicked => { root.ctx(root.menu-kind, root.menu-idx, "next", 0); } }
+                if root.menu-kind != 2 && root.menu-installed: MenuItem { label: "Add to queue"; clicked => { root.ctx(root.menu-kind, root.menu-idx, "queue", 0); } }
+                if root.menu-kind != 2 && root.menu-installed: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.raised; } }
+                if root.menu-kind != 2 && root.menu-installed: Label { text: "ADD TO PLAYLIST"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 26px; x: 12px; vertical-alignment: center; }
+                // Every playlist is reachable: the list scrolls when it is longer than 8 rows.
+                if root.menu-kind != 2 && root.menu-installed && root.sources.length > 1: Flickable {
+                    height: min(8 * 34px, (root.sources.length - 1) * 34px);
+                    content-height: (root.sources.length - 1) * 34px;
+                    content-width: self.width;
+                    for name[i] in root.sources: Rectangle {
+                        y: (i - 1) * 34px;
+                        height: 34px;
+                        width: parent.width;
+                        visible: i > 0;
+                        MenuItem { label: name; clicked => { root.ctx(root.menu-kind, root.menu-idx, "add", i - 1); } }
+                    }
+                }
+                if root.menu-kind != 2 && root.menu-installed && root.sources.length > 9: MenuItem { label: "Find a playlist\u{2026}"; clicked => { root.picker-open = true; root.picker-filter(""); } }
+                if root.menu-kind != 2 && root.menu-installed: MenuItem { label: "New playlist\u{2026}"; clicked => { root.ctx(root.menu-kind, root.menu-idx, "new", -1); } }
+                if root.menu-kind != 2 && root.menu-installed: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.raised; } }
+                if root.menu-kind != 2 && root.menu-installed: MenuItem { label: "Delete song\u{2026}"; danger: true; clicked => { root.ctx(root.menu-kind, root.menu-idx, "delete", 0); } }
+                if root.menu-kind == 0 && root.viewing-playlist: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.raised; } }
+                if root.menu-kind == 0 && root.viewing-playlist: MenuItem { label: "Remove from playlist"; danger: true; clicked => { root.ctx(0, root.menu-idx, "remove", 0); } }
+            }
+        }
+    }
+
+    // The songs that play next, above the middle of the player bar: the ones you queued first
+    // (orange edge), then the ones autoplay added (grey edge), then the rest of the playlist.
+    // Scroll with the wheel or drag the bar underneath.
+    qp := Rectangle {
+        visible: root.queue-t > 0.01;
+        opacity: root.queue-t;
+        property <length> view-w: self.width - 114px;
+        property <length> content-w: root.up-next.length * 188px;
+        property <length> max-scroll: max(0px, self.content-w - self.view-w);
+        property <length> thumb-w: self.content-w <= self.view-w ? self.view-w : max(28px, self.view-w * self.view-w / self.content-w);
+        property <length> offset: min(root.queue-scroll, self.max-scroll);
+        width: min(780px, root.width - 360px);
+        height: root.queue-panel-h;
+        x: (root.width - self.width) / 2;
+        // 5 px of gap keeps the panel apart from the player bar.
+        // It rises from the bar while it fades in, and sinks back when it goes.
+        y: root.height - root.bar-h - self.height - 5px + (1 - root.queue-t) * 18px;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.raised;
+        border-radius: 10px;
+        Label { x: 12px; width: 56px; height: 56px; text: "QUEUE"; color: Theme.muted; font-size: 14px; font-weight: 700; vertical-alignment: center; }
+        // Fold the panel away.
+        Rectangle {
+            x: parent.width - 38px;
+            y: 6px;
+            width: 28px;
+            height: 28px;
+            border-radius: 14px;
+            background: fold-ta.has-hover ? Theme.raised : transparent;
+            animate background { duration: 120ms; }
+            Path {
+                width: 12px;
+                height: 8px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                viewbox-width: 12;
+                viewbox-height: 8;
+                commands: "M 1 1 L 6 6 L 11 1";
+                stroke: fold-ta.has-hover ? Theme.text : Theme.muted;
+                stroke-width: 1.8px;
+                stroke-line-cap: round;
+                stroke-line-join: round;
+            }
+            fold-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.queue-open = false; }
+            }
+        }
+        if root.up-next.length == 0 && root.autoplay-busy: Label {
+            x: 74px;
+            width: parent.view-w;
+            height: 56px;
+            text: "Finding songs that match this one...";
+            color: Theme.muted;
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            x: 74px;
+            y: 6px;
+            width: parent.view-w;
+            height: 56px;
+            clip: true;
+            HorizontalLayout {
+                x: -qp.offset;
+                spacing: 12px;
+                alignment: start;
+                for item[idx] in root.up-next: qcard := Rectangle {
+                    // The card under the pointer lights up; pressing it darkens it a little.
+                    property <bool> hot: qta.hover-idx == idx;
+                    width: 176px;
+                    border-radius: 6px;
+                    background: self.hot ? (qta.pressed ? Theme.accent-dim : Theme.hover) : (item.kind == 0 ? Theme.raised : transparent);
+                    border-width: (self.hot || item.kind != 0) ? 1px : 0px;
+                    border-color: self.hot ? Theme.accent : Theme.raised;
+                    animate background, border-color { duration: 110ms; }
+                    Rectangle {
+                        x: 0;
+                        width: 4px;
+                        border-radius: 2px;
+                        background: item.kind == 0 ? Theme.accent : transparent;
+                    }
+                    HorizontalLayout {
+                        x: 10px;
+                        width: parent.width - 14px;
+                        spacing: 8px;
+                        Rectangle {
+                            width: 42px;
+                            height: 42px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 4px;
+                            clip: true;
+                            Image { source: item.art; width: 100%; height: 100%; image-fit: cover; }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Label { text: item.title; color: qcard.hot ? Theme.accent-hot : (item.kind == 2 ? Theme.muted : Theme.text); font-size: 14px; font-weight: 600; overflow: elide; animate color { duration: 110ms; } }
+                            Label { text: item.artist; color: Theme.muted; font-size: 14px; overflow: elide; }
+                        }
+                    }
+                }
+            }
+            // The wheel scrolls the queue sideways, whichever way it turns.
+            qta := TouchArea {
+                // Which song is under the pointer: the cards are 176 px wide with 12 px between.
+                property <int> hover-idx: self.has-hover && self.on-card ? Math.floor(self.card-pos) : -1;
+                property <float> card-pos: (self.mouse-x + qp.offset) / 188px;
+                property <bool> on-card: Math.mod(self.card-pos, 1.0) < 176.0 / 188.0 && self.card-pos >= 0 && self.card-pos < root.up-next.length;
+                mouse-cursor: self.on-card ? pointer : default;
+                clicked => {
+                    if (self.on-card) {
+                        root.jump-to(Math.floor(self.card-pos));
+                    }
+                }
+                scroll-event(e) => {
+                    root.queue-scroll = max(0px, min(qp.max-scroll, root.queue-scroll - e.delta-y - e.delta-x));
+                    accept
+                }
+            }
+        }
+        // Scroll bar: a track the width of the visible part, and a thumb that shows where you are.
+        Rectangle {
+            x: 74px;
+            y: 66px;
+            width: parent.view-w;
+            height: 8px;
+            border-radius: 4px;
+            background: Theme.raised;
+            visible: parent.content-w > parent.view-w;
+            Rectangle {
+                x: qp.max-scroll <= 0px ? 0px : (parent.width - self.width) * qp.offset / qp.max-scroll;
+                width: qp.thumb-w;
+                height: parent.height;
+                border-radius: 4px;
+                background: bar-ta.has-hover || bar-ta.pressed ? Theme.accent : Theme.muted;
+            }
+            bar-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                pointer-event(e) => {
+                    if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                        root.queue-scroll = max(0px, min(qp.max-scroll, (self.mouse-x - qp.thumb-w / 2) / max(1px, parent.width - qp.thumb-w) * qp.max-scroll));
+                    }
+                }
+                moved => {
+                    if (self.pressed) {
+                        root.queue-scroll = max(0px, min(qp.max-scroll, (self.mouse-x - qp.thumb-w / 2) / max(1px, parent.width - qp.thumb-w) * qp.max-scroll));
+                    }
+                }
+            }
+        }
+    }
+
+    // The tab that brings the folded queue panel back.
+    Rectangle {
+        visible: root.tab-t > 0.01;
+        opacity: root.tab-t;
+        width: 92px;
+        height: 26px;
+        x: (root.width - self.width) / 2;
+        y: root.height - root.bar-h - self.height - 5px + (1 - root.tab-t) * 12px;
+        border-radius: 13px;
+        background: tab-ta.has-hover ? Theme.raised : Theme.panel;
+        animate background { duration: 120ms; }
+        border-width: 1px;
+        border-color: Theme.raised;
+        Label {
+            text: "QUEUE";
+            color: Theme.muted;
+            font-size: 14px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        tab-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { root.queue-open = true; }
+        }
+    }
+
+    // Lyrics, over the right side above the player bar.
+    if root.lyrics-open: Rectangle {
+        width: min(440px, root.width - 32px);
+        height: min(440px, root.height - root.bar-h - 90px);
+        x: root.width - self.width - 16px;
+        y: root.height - root.bar-h - self.height - 10px;
+        border-radius: 12px;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.raised;
+        VerticalLayout {
+            padding: 16px;
+            spacing: 8px;
+            Label { text: "LYRICS"; color: Theme.muted; font-size: 14px; font-weight: 700; }
+            if root.lyrics-note != "": Label {
+                text: root.lyrics-note;
+                color: Theme.muted;
+                font-size: 14px;
+                wrap: word-wrap;
+            }
+            // Lyrics with no times: a plain list the user scrolls.
+            if !root.lyrics-synced: ListView {
+                for line in root.lyrics-rows: Rectangle {
+                    height: plain.preferred-height + 8px;
+                    plain := Label {
+                        width: parent.width;
+                        text: line.text;
+                        color: Theme.text;
+                        font-size: 16px;
+                        wrap: word-wrap;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            // Lyrics with times: the line being sung stays in the middle and the rest glide past.
+            if root.lyrics-synced: Rectangle {
+                vertical-stretch: 1;
+                clip: true;
+                Rectangle {
+                    width: parent.width;
+                    y: parent.height / 2 - (max(root.lyrics-current, 0) + 0.5) * 56px;
+                    animate y { duration: 450ms; easing: ease-in-out; }
+                    for line[i] in root.lyrics-rows: Rectangle {
+                        y: i * 56px;
+                        height: 56px;
+                        visible: abs(i - root.lyrics-current) <= 8;
+                        opacity: max(0.2, 1.0 - abs(i - max(root.lyrics-current, 0)) * 0.3);
+                        animate opacity { duration: 350ms; }
+                        Label {
+                            width: parent.width;
+                            height: parent.height;
+                            text: line.text;
+                            color: i == root.lyrics-current ? Theme.accent : Theme.text;
+                            animate color { duration: 300ms; }
+                            font-size: i == root.lyrics-current ? 20px : 15px;
+                            animate font-size { duration: 300ms; easing: ease-out; }
+                            wrap: word-wrap;
+                            overflow: elide;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Toast over the player bar.
+    Rectangle {
+        // As wide as the text needs, up to the window; longer text wraps and the toast grows.
+        width: min(root.width - 32px, max(220px, toast-text.preferred-width + 40px));
+        height: max(40px, toast-text.preferred-height + 20px);
+        x: (root.width - self.width) / 2;
+        y: root.height - root.bar-h - (root.queue-t * (root.queue-panel-h + 11px)) - (root.tab-t * 31px) - (root.toast-on ? 52px : 8px) - (self.height - 40px);
+        opacity: root.toast-on ? 1 : 0;
+        animate y { duration: 260ms; easing: ease-out; }
+        animate opacity { duration: 200ms; }
+        border-radius: 20px;
+        background: Theme.accent;
+        toast-text := Label {
+            x: 20px;
+            width: parent.width - 40px;
+            height: parent.height;
+            text: root.toast;
+            color: #1a1209;
+            font-size: 16px;
+            font-weight: 700;
+            wrap: word-wrap;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    // A chip that flies from the menu down to the player bar.
+    Rectangle {
+        visible: root.fly-on;
+        x: root.fly-x;
+        y: root.fly-y;
+        width: 40px;
+        height: 40px;
+        border-radius: 8px;
+        background: Theme.accent;
+        states [
+            flying when root.fly-on: {
+                x: queue-label.absolute-position.x + 8px;
+                y: queue-label.absolute-position.y + 8px;
+                width: 12px;
+                height: 12px;
+                opacity: 0;
+                in { animate x, y, width, height, opacity { duration: 520ms; easing: ease-in; } }
+            }
+        ]
+        Label { text: "+"; color: #1a1209; font-size: 24px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+    }
+
+    // Confirm deleting a song.
+    if root.confirm-open: Rectangle {
+        background: #000000a0;
+        TouchArea { clicked => { root.confirm-open = false; } }
+        Rectangle {
+            width: min(420px, parent.width - 32px);
+            height: 176px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2 - 40px;
+            background: Theme.panel;
+            border-radius: 12px;
+            border-width: 2px;
+            border-color: Theme.danger;
+            TouchArea { }
+            Label { x: 20px; y: 14px; width: parent.width - 40px; height: 28px; text: root.confirm-title; color: Theme.text; font-size: 20px; font-weight: 700; vertical-alignment: center; overflow: elide; }
+            Label { x: 20px; y: 52px; width: parent.width - 40px; height: 60px; text: root.confirm-text; color: Theme.muted; font-size: 16px; wrap: word-wrap; vertical-alignment: top; }
+            HorizontalLayout {
+                x: 20px;
+                y: 124px;
+                width: parent.width - 40px;
+                height: 40px;
+                spacing: 10px;
+                alignment: end;
+                Rectangle {
+                    width: 96px;
+                    border-radius: 8px;
+                    background: no-ta.has-hover ? Theme.hover : Theme.raised;
+                    no-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.confirm-open = false; } }
+                    Label { text: "Cancel"; color: Theme.text; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle {
+                    width: 96px;
+                    border-radius: 8px;
+                    background: yes-ta.has-hover ? #f06469 : Theme.danger;
+                    yes-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.confirm-open = false; root.confirm-accepted(); } }
+                    Label { text: "Delete"; color: #ffffff; font-size: 16px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+        }
+    }
+
+    // Name dialog.
+    // First run: ask for the music folder.
+    if root.onboarding-open: Rectangle {
+        background: #000000c0;
+        TouchArea { }
+        Rectangle {
+            width: min(460px, parent.width - 32px);
+            height: 300px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.panel;
+            border-radius: 14px;
+            border-width: 2px;
+            border-color: Theme.accent;
+            Image {
+                source: root.mascot.width > 0 ? root.mascot : @image-url("../../../assets/icon/meowtify-orange-512.png");
+                x: (parent.width - self.width) / 2;
+                y: 20px;
+                width: 56px;
+                height: 56px;
+                image-rendering: pixelated;
+            }
+            Label { x: 24px; y: 86px; width: parent.width - 48px; height: 34px; text: "Welcome to Meowtify"; color: Theme.accent; font-size: 24px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+            Label {
+                x: 32px;
+                y: 128px;
+                width: parent.width - 64px;
+                height: 80px;
+                text: "Pick the folder where your music is stored. Meowtify plays what is in it and saves your downloads there. You can change it later in Settings.";
+                color: Theme.muted;
+                font-size: 16px;
+                wrap: word-wrap;
+                horizontal-alignment: center;
+            }
+            Pill { x: (parent.width - self.width) / 2 - 70px; y: 232px; width: 190px; text: "Choose music folder"; clicked => { root.choose-folder(); } }
+            Pill { x: (parent.width - self.width) / 2 + 100px; y: 232px; width: 100px; text: "Not now"; primary: false; clicked => { root.onboarding-open = false; root.view = 1; } }
+        }
+    }
+
+    // Search the playlists, then add the song to the one chosen. For long lists.
+    if root.picker-open: Rectangle {
+        background: #000000a0;
+        TouchArea { clicked => { root.picker-open = false; } }
+        Rectangle {
+            width: min(380px, parent.width - 32px);
+            height: min(parent.height - 40px, 360px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2 - 20px;
+            background: Theme.panel;
+            border-radius: 12px;
+            border-width: 2px;
+            border-color: Theme.accent;
+            TouchArea { }
+            Label { x: 20px; y: 14px; width: parent.width - 40px; height: 28px; text: "Add to playlist"; color: Theme.text; font-size: 20px; font-weight: 700; vertical-alignment: center; }
+            Rectangle {
+                x: 20px;
+                y: 50px;
+                width: parent.width - 40px;
+                height: 40px;
+                border-radius: 8px;
+                background: Theme.raised;
+                border-width: 1px;
+                border-color: pick-input.has-focus ? Theme.accent : #3a3a42;
+                pick-input := TextInput {
+                    x: 12px;
+                    width: parent.width - 24px;
+                    height: parent.height;
+                    color: Theme.text;
+                    font-family: "Unifont Heavy";
+                    font-size: 16px;
+                    single-line: true;
+                    vertical-alignment: center;
+                    init => { self.focus(); }
+                    edited => { root.picker-filter(self.text); }
+                    accepted => {
+                        if (root.picker-rows.length > 0) {
+                            root.picker-open = false;
+                            root.ctx(root.menu-kind, root.menu-idx, "add", root.picker-rows[0].index);
+                        }
+                    }
+                    key-pressed(e) => {
+                        if (e.text == Key.Escape) { root.picker-open = false; return accept; }
+                        reject
+                    }
+                }
+            }
+            Flickable {
+                x: 14px;
+                y: 100px;
+                width: parent.width - 28px;
+                height: parent.height - 112px;
+                content-height: root.picker-rows.length * 34px;
+                content-width: self.width;
+                for row[i] in root.picker-rows: MenuItem {
+                    y: i * 34px;
+                    width: parent.width;
+                    label: row.name;
+                    clicked => { root.picker-open = false; root.ctx(root.menu-kind, root.menu-idx, "add", row.index); }
+                }
+            }
+            if root.picker-rows.length == 0: Label { x: 20px; y: 108px; text: "No playlist matches."; color: Theme.muted; font-size: 16px; }
+        }
+    }
+
+    if root.name-open: Rectangle {
+        background: #000000a0;
+        TouchArea { clicked => { root.name-open = false; } }
+        Rectangle {
+            width: min(380px, parent.width - 32px);
+            height: 214px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2 - 40px;
+            background: Theme.panel;
+            border-radius: 12px;
+            border-width: 2px;
+            border-color: Theme.accent;
+            TouchArea { }
+            Label { x: 20px; y: 14px; width: parent.width - 40px; height: 28px; text: root.name-title; color: Theme.text; font-size: 20px; font-weight: 700; vertical-alignment: center; }
+            // Cover: click to choose an image file.
+            Rectangle {
+                x: 20px;
+                y: 52px;
+                width: 72px;
+                height: 72px;
+                border-radius: 8px;
+                clip: true;
+                background: Theme.raised;
+                Image {
+                    source: @image-url("../../../assets/icon/playlist-default-512.png");
+                    width: parent.width;
+                    height: parent.height;
+                    image-rendering: pixelated;
+                }
+                Image {
+                    source: root.name-cover;
+                    width: parent.width;
+                    height: parent.height;
+                    opacity: root.name-cover.width > 0 ? 1 : 0;
+                    animate opacity { duration: 200ms; }
+                }
+                Rectangle {
+                    background: #000000b0;
+                    opacity: cover-ta.has-hover ? 1 : 0;
+                    animate opacity { duration: 120ms; }
+                    Label { text: "Change"; color: Theme.text; font-size: 16px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                cover-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.pick-cover(); } }
+            }
+            if root.name-has-cover: Rectangle {
+                x: 104px;
+                y: 100px;
+                width: 140px;
+                height: 24px;
+                rm-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.clear-cover(); } }
+                Label { text: "Remove cover"; color: rm-ta.has-hover ? Theme.danger : Theme.muted; font-size: 16px; vertical-alignment: center; }
+            }
+            Rectangle {
+                x: 104px;
+                y: 52px;
+                width: parent.width - 124px;
+                height: 40px;
+                border-radius: 8px;
+                background: Theme.raised;
+                border-width: 1px;
+                border-color: name-input.has-focus ? Theme.accent : #3a3a42;
+                name-input := TextInput {
+                    x: 12px;
+                    width: parent.width - 24px;
+                    height: parent.height;
+                    color: Theme.text;
+                    font-family: "Unifont Heavy";
+                    font-size: 16px;
+                    single-line: true;
+                    vertical-alignment: center;
+                    text: root.name-initial;
+                    init => { self.focus(); self.select-all(); }
+                    accepted => { root.name-open = false; root.name-submitted(self.text); }
+                    key-pressed(e) => {
+                        if (e.text == Key.Escape) { root.name-open = false; return accept; }
+                        reject
+                    }
+                }
+            }
+            HorizontalLayout {
+                x: 20px;
+                y: 160px;
+                width: parent.width - 40px;
+                height: 40px;
+                spacing: 10px;
+                alignment: end;
+                Rectangle {
+                    width: 96px;
+                    border-radius: 8px;
+                    background: cancel-ta.has-hover ? Theme.hover : Theme.raised;
+                    cancel-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.name-open = false; } }
+                    Label { text: "Cancel"; color: Theme.text; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle {
+                    width: 96px;
+                    border-radius: 8px;
+                    background: ok-ta.has-hover ? Theme.accent-hot : Theme.accent;
+                    ok-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.name-open = false; root.name-submitted(name-input.text); } }
+                    Label { text: "OK"; color: #1a1209; font-size: 16px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+        }
+    }
+
+
+}

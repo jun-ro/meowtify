@@ -1,0 +1,81 @@
+package meowtify:plugin@0.1.0;
+
+interface types {
+    record track {
+        id: string,
+        title: string,
+        artist: string,
+        album: string,
+        duration-ms: u32,
+    }
+
+    record lyric-line {
+        start-ms: u32,
+        text: string,
+    }
+
+    record lyrics {
+        lines: list<lyric-line>,
+        source: option<string>,
+    }
+
+    enum log-level {
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    enum error-kind {
+        denied,
+        invalid,
+        too-large,
+        quota,
+        unavailable,
+    }
+
+    record host-error {
+        kind: error-kind,
+        message: string,
+    }
+
+    record http-response {
+        status: u16,
+        body: list<u8>,
+    }
+}
+
+interface host {
+    use types.{track, log-level, host-error, http-response};
+
+    log: func(level: log-level, message: string);
+
+    play: func() -> result<_, host-error>;
+    pause: func() -> result<_, host-error>;
+    next: func() -> result<_, host-error>;
+    previous: func() -> result<_, host-error>;
+    seek: func(position-ms: u32) -> result<_, host-error>;
+    set-volume: func(percent: u8) -> result<_, host-error>;
+
+    now-playing: func() -> result<option<track>, host-error>;
+    queue: func() -> result<list<track>, host-error>;
+    queue-add: func(track-id: string) -> result<_, host-error>;
+    queue-remove: func(track-id: string) -> result<_, host-error>;
+
+    fetch: func(url: string) -> result<http-response, host-error>;
+
+    storage-get: func(key: string) -> result<option<list<u8>>, host-error>;
+    storage-set: func(key: string, value: list<u8>) -> result<_, host-error>;
+    storage-delete: func(key: string) -> result<_, host-error>;
+}
+
+world plugin {
+    use types.{track, lyrics};
+
+    import host;
+
+    export on-track-change: func(track: track);
+    export on-progress: func(position-ms: u32);
+    export on-queue-change: func(queue: list<track>);
+    export get-lyrics: func(track: track) -> option<lyrics>;
+}
