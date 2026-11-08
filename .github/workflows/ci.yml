@@ -32,7 +32,7 @@ jobs:
           # Only main writes the cache. Pull requests and tags read it.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked -p meowtify -p meowtify-cli
 
   # Builds the same way a release does, which keeps the release cache warm.
   build:
@@ -45,4 +45,4 @@ jobs:
           shared-key: release
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked -p meowtify -p meowtify-cli

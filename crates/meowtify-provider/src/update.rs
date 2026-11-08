@@ -14,9 +14,29 @@ use crate::{ProviderError, Result};
 
 const API: &str = "https://api.github.com/repos/jun-ro/meowtify/releases/latest";
 const DOWNLOAD_PREFIX: &str = "https://github.com/jun-ro/meowtify/releases/download/";
-/// The program inside a release. Only Windows builds are published.
+/// The app inside a release. Only Windows builds are published.
 const ASSET: &str = "meowtify-windows-x64.exe";
+/// The command line tool inside a release. Releases before the tool existed lack it.
+const CLI_ASSET: &str = "meowtify-cli-windows-x64.exe";
 const SUMS: &str = "SHA256SUMS";
+
+/// A program a release can hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Program {
+    /// The app with the window.
+    App,
+    /// The command line tool, for when the window does not work.
+    Cli,
+}
+
+impl Program {
+    fn asset(self) -> &'static str {
+        match self {
+            Program::App => ASSET,
+            Program::Cli => CLI_ASSET,
+        }
+    }
+}
 
 /// A release newer than the running app.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,7 +44,17 @@ pub struct Release {
     pub version: String,
     pub notes: String,
     exe_url: String,
+    cli_url: Option<String>,
     sums_url: String,
+}
+
+impl Release {
+    fn url(&self, program: Program) -> Option<&str> {
+        match program {
+            Program::App => Some(&self.exe_url),
+            Program::Cli => self.cli_url.as_deref(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -66,8 +96,9 @@ fn link_ok(url: &str) -> bool {
         && !url.contains("..")
 }
 
-/// The release in `body`, when it is newer than `current` and has the files we need.
-fn pick(body: &[u8], current: &str) -> Result<Option<Release>> {
+/// The release in `body`, when it is newer than `current` (or `force` is set) and has the files
+/// we need.
+fn pick(body: &[u8], current: &str, force: bool) -> Result<Option<Release>> {
     let r: ApiRelease = serde_json::from_slice(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
     if r.draft || r.prerelease {
         return Ok(None);
@@ -75,7 +106,7 @@ fn pick(body: &[u8], current: &str) -> Result<Option<Release>> {
     let (Some(new), Some(old)) = (parse_version(&r.tag_name), parse_version(current)) else {
         return Err(ProviderError::Parse(format!("cannot read the version {:?}", r.tag_name)));
     };
-    if new <= old {
+    if new <= old && !force {
         return Ok(None);
     }
     let find = |name: &str| r.assets.iter().find(|a| a.name == name).map(|a| a.browser_download_url.clone()).filter(|u| link_ok(u));
@@ -83,48 +114,71 @@ fn pick(body: &[u8], current: &str) -> Result<Option<Release>> {
         return Err(ProviderError::Parse("the latest release has no program for this system".into()));
     };
     let notes: String = r.body.unwrap_or_default().chars().filter(|c| !c.is_control() || *c == '\n').take(1500).collect();
-    Ok(Some(Release { version: r.tag_name.trim_start_matches('v').to_string(), notes, exe_url, sums_url }))
+    let cli_url = find(CLI_ASSET);
+    Ok(Some(Release { version: r.tag_name.trim_start_matches('v').to_string(), notes, exe_url, cli_url, sums_url }))
 }
 
 /// Asks GitHub for the latest release. `Ok(None)` means the app is current. Other systems than
 /// Windows never get an update, because no program is published for them.
 pub async fn check(current: &str) -> Result<Option<Release>> {
+    check_with(current, false).await
+}
+
+/// Like [`check`]. With `force` the latest release is returned even when it is not newer, so a
+/// damaged install can be put back.
+pub async fn check_with(current: &str, force: bool) -> Result<Option<Release>> {
     if !cfg!(windows) {
         return Ok(None);
     }
     let body = curl_get(API, "Meowtify-updater", 15).await?;
-    pick(&body, current)
+    pick(&body, current, force)
 }
 
 /// Downloads `release`, checks its hash, and puts it in place of the running program. The old
 /// program stays beside it as `.old` until the next start. Returns the path to launch.
 pub async fn install(release: &Release) -> Result<PathBuf> {
     let exe = std::env::current_exe().map_err(|e| ProviderError::Io(e.to_string()))?;
-    let part = side(&exe, "new");
-    let old = side(&exe, "old");
+    install_program(release, Program::App, &exe).await?;
+    Ok(exe)
+}
+
+/// Downloads `program` from `release`, checks its hash, and puts it in place of the file at
+/// `exe`. That file may be running: it is renamed to `.old`, which the program removes at its
+/// next start.
+pub async fn install_program(release: &Release, program: Program, exe: &Path) -> Result<()> {
+    let asset = program.asset();
+    let url = release.url(program).ok_or_else(|| ProviderError::Parse(format!("the release has no {asset}")))?;
+    let part = side(exe, "new");
+    let old = side(exe, "old");
     let _ = std::fs::remove_file(&part);
 
     let sums = curl_get(&release.sums_url, "Meowtify-updater", 30).await?;
     let sums = String::from_utf8_lossy(&sums);
-    let expected = expected_hash(&sums, ASSET).ok_or_else(|| ProviderError::Parse(format!("no {ASSET} entry in {SUMS}")))?;
+    let expected = expected_hash(&sums, asset).ok_or_else(|| ProviderError::Parse(format!("no {asset} entry in {SUMS}")))?;
 
     let done = async {
-        curl_file(&release.exe_url, &part).await?;
+        curl_file(url, &part).await?;
         if hash_file(&part).await.as_deref() != Some(expected.as_str()) {
             return Err(ProviderError::Tool("the download did not match its checksum".into()));
         }
         // A running program cannot be overwritten on Windows, but it can be renamed.
         let _ = std::fs::remove_file(&old);
-        std::fs::rename(&exe, &old).map_err(|e| ProviderError::Io(e.to_string()))?;
-        if let Err(e) = std::fs::rename(&part, &exe) {
-            let _ = std::fs::rename(&old, &exe);
+        // A missing file (a damaged install) has nothing to move aside.
+        let moved = exe.exists();
+        if moved {
+            std::fs::rename(exe, &old).map_err(|e| ProviderError::Io(e.to_string()))?;
+        }
+        if let Err(e) = std::fs::rename(&part, exe) {
+            if moved {
+                let _ = std::fs::rename(&old, exe);
+            }
             return Err(ProviderError::Io(e.to_string()));
         }
         Ok(())
     }
     .await;
     let _ = std::fs::remove_file(&part);
-    done.map(|_| exe)
+    done
 }
 
 /// Removes the program left behind by the last update. Call once at start.
@@ -167,27 +221,45 @@ mod tests {
 
     #[test]
     fn newer_release_is_offered() {
-        let r = pick(release("v0.2.0", "").as_bytes(), "0.1.0").unwrap().unwrap();
+        let r = pick(release("v0.2.0", "").as_bytes(), "0.1.0", false).unwrap().unwrap();
         assert_eq!(r.version, "0.2.0");
         assert_eq!(r.notes, "Notes");
     }
 
     #[test]
     fn same_or_older_release_is_not() {
-        assert_eq!(pick(release("v0.1.0", "").as_bytes(), "0.1.0").unwrap(), None);
-        assert_eq!(pick(release("v0.0.9", "").as_bytes(), "0.1.0").unwrap(), None);
+        assert_eq!(pick(release("v0.1.0", "").as_bytes(), "0.1.0", false).unwrap(), None);
+        assert_eq!(pick(release("v0.0.9", "").as_bytes(), "0.1.0", false).unwrap(), None);
+    }
+
+    #[test]
+    fn force_offers_the_current_release_again() {
+        assert!(pick(release("v0.1.0", "").as_bytes(), "0.1.0", true).unwrap().is_some());
+        assert!(pick(release("v9.0.0", r#","draft":true"#).as_bytes(), "0.1.0", true).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_tool_is_optional_in_a_release() {
+        let r = pick(release("v0.2.0", "").as_bytes(), "0.1.0", false).unwrap().unwrap();
+        assert_eq!(r.url(Program::Cli), None);
+        let with_cli = release("v0.2.0", "").replace(
+            "]}",
+            &format!(r#",{{"name":"{CLI_ASSET}","browser_download_url":"{DOWNLOAD_PREFIX}v0.2.0/{CLI_ASSET}"}}]}}"#),
+        );
+        let r = pick(with_cli.as_bytes(), "0.1.0", false).unwrap().unwrap();
+        assert!(r.url(Program::Cli).is_some());
     }
 
     #[test]
     fn drafts_and_prereleases_are_skipped() {
-        assert_eq!(pick(release("v9.0.0", r#","prerelease":true"#).as_bytes(), "0.1.0").unwrap(), None);
-        assert_eq!(pick(release("v9.0.0", r#","draft":true"#).as_bytes(), "0.1.0").unwrap(), None);
+        assert_eq!(pick(release("v9.0.0", r#","prerelease":true"#).as_bytes(), "0.1.0", false).unwrap(), None);
+        assert_eq!(pick(release("v9.0.0", r#","draft":true"#).as_bytes(), "0.1.0", false).unwrap(), None);
     }
 
     #[test]
     fn foreign_links_are_refused() {
         let evil = release("v0.2.0", "").replace(DOWNLOAD_PREFIX, "https://example.com/");
-        assert!(pick(evil.as_bytes(), "0.1.0").is_err());
+        assert!(pick(evil.as_bytes(), "0.1.0", false).is_err());
         assert!(!link_ok(&format!("{DOWNLOAD_PREFIX}v1/../../x")));
         assert!(!link_ok("https://github.com/someone-else/meowtify/releases/download/v1/x"));
         assert!(link_ok(&format!("{DOWNLOAD_PREFIX}v1.0.0/{ASSET}")));
@@ -196,7 +268,7 @@ mod tests {
     #[test]
     fn a_release_without_the_program_is_an_error() {
         let body = r#"{"tag_name":"v0.2.0","assets":[]}"#;
-        assert!(pick(body.as_bytes(), "0.1.0").is_err());
+        assert!(pick(body.as_bytes(), "0.1.0", false).is_err());
     }
 
     #[test]

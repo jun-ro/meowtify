@@ -32,17 +32,18 @@ jobs:
             exit 1
           fi
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked -p meowtify -p meowtify-cli
       - name: Package
         shell: bash
         run: |
           mkdir dist
           cp target/release/meowtify.exe dist/meowtify-windows-x64.exe
+          cp target/release/meowtify-cli.exe dist/meowtify-cli-windows-x64.exe
           cd dist
-          sha256sum meowtify-windows-x64.exe > SHA256SUMS
+          sha256sum meowtify-windows-x64.exe meowtify-cli-windows-x64.exe > SHA256SUMS
           cat SHA256SUMS
       - name: Publish
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --generate-notes dist/meowtify-windows-x64.exe dist/SHA256SUMS
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes dist/meowtify-windows-x64.exe dist/meowtify-cli-windows-x64.exe dist/SHA256SUMS

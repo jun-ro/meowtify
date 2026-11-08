@@ -31,7 +31,7 @@ pub use audius::Audius;
 pub use lyrics::{find as find_lyrics, Line as LyricLine, Lyrics, Query as LyricsQuery};
 pub use soundcloud::SoundCloud;
 pub mod app_update {
-    pub use crate::update::{check, clean_up, install, Release};
+    pub use crate::update::{check, check_with, clean_up, install, install_program, Program, Release};
 }
 pub use youtube::{validate_youtube_url, yt_dlp_version, Tools, YouTube};
 pub use ytdlp::{fetch_thumbnail, suggest, UpdateOutcome, YtDlp};
