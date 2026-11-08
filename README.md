@@ -13,8 +13,8 @@
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-orange">
   <img alt="Rust 2021" src="https://img.shields.io/badge/rust-2021-orange">
   <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-blue">
-  <img alt="Memory under 300 MB" src="https://img.shields.io/badge/memory-%3C%20300%20MB-brightgreen">
-  <a href="https://slint.dev"><img alt="Made with Slint" src="https://img.shields.io/badge/made%20with-Slint-2379F4"></a>
+  <img alt="Memory 300 MB max" src="https://img.shields.io/badge/memory-300_MB_max-brightgreen">
+  <a href="https://slint.dev"><img alt="Made with Slint" src="https://img.shields.io/badge/built_with-Slint-2379F4"></a>
 </p>
 
 ---
