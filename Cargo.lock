@@ -3280,9 +3280,11 @@ dependencies = [
 name = "meowtify-ios"
 version = "0.1.6"
 dependencies = [
+ "meowtify-autoplay",
  "meowtify-core",
  "meowtify-library",
  "meowtify-player",
+ "meowtify-provider",
  "meowtify-ui",
  "slint",
  "tokio",
@@ -3384,11 +3386,15 @@ name = "meowtify-provider"
 version = "0.1.6"
 dependencies = [
  "async-trait",
+ "lofty",
  "meowtify-core",
  "serde",
  "serde_json",
  "sha2",
+ "symphonia",
  "tokio",
+ "tokio-rustls",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -5312,6 +5318,7 @@ version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",

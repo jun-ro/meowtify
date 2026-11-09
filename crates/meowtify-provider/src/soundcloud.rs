@@ -63,7 +63,7 @@ fn parse_entry(line: &str) -> Result<Option<Item>> {
 }
 
 /// Accepts https links to soundcloud.com only, so a result cannot point yt-dlp elsewhere.
-fn validate_url(s: &str) -> Result<String> {
+pub(crate) fn validate_url(s: &str) -> Result<String> {
     let bad = |m: &str| Err(ProviderError::Invalid(m.to_string()));
     let s = s.trim();
     if s.len() > 500 || s.chars().any(|c| c.is_control() || c.is_whitespace()) {

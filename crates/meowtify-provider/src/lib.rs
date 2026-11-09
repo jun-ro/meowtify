@@ -8,6 +8,7 @@
 mod audius;
 mod lyrics;
 mod manager;
+mod native;
 mod net;
 mod recommend;
 mod soundcloud;
@@ -28,6 +29,8 @@ pub use recommend::{
 pub use net::{proxy, set_proxy, validate_proxy};
 pub use manager::{DownloadManager, Job, JobState, DEFAULT_PARALLEL};
 pub use audius::Audius;
+#[cfg(any(target_os = "ios", feature = "native-extract"))]
+pub use native::{providers as native_providers, NativeSoundCloud, NativeYouTube};
 pub use lyrics::{find as find_lyrics, Line as LyricLine, Lyrics, Query as LyricsQuery};
 pub use soundcloud::SoundCloud;
 pub mod app_update {

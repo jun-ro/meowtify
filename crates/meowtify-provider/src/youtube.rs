@@ -29,7 +29,7 @@ const FAST_PAGE: u32 = 20;
 /// How many ordinary results to fetch. One page, so no extra request.
 const GENERAL_COUNT: u32 = 20;
 /// YouTube Music search filter: songs only.
-const SONGS_FILTER: &str = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
+pub(crate) const SONGS_FILTER: &str = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
 const HOSTS: [&str; 5] = ["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"];
 
 /// Paths of the programs this provider runs.
@@ -344,7 +344,7 @@ fn parse_entry(line: &str) -> Result<Option<Item>> {
 }
 
 const MUSIC_SEARCH_URL: &str = "https://music.youtube.com/youtubei/v1/search?prettyPrint=false";
-const MUSIC_CLIENT_VERSION: &str = "1.20240724.01.00";
+pub(crate) const MUSIC_CLIENT_VERSION: &str = "1.20240724.01.00";
 
 /// Songs-only search through the YouTube Music web API. About 0.5 s, against 2 s or
 /// more for yt-dlp, and the answer already carries artist and length.
@@ -355,14 +355,21 @@ pub(crate) async fn music_search(q: &str, limit: usize) -> Result<Vec<Item>> {
         "params": SONGS_FILTER,
     })
     .to_string();
-    let out = crate::ytdlp::curl_post_json(MUSIC_SEARCH_URL, &body, 8).await?;
-    parse_music_search(&out, limit)
+    // In process, so this also works where curl cannot run (iOS).
+    let headers = [("User-Agent", crate::native::http::DESKTOP_UA), ("Origin", "https://music.youtube.com")];
+    let answer = crate::native::http::post_json_value(MUSIC_SEARCH_URL, body.as_bytes(), &headers, 8 * 1024 * 1024, "YouTube Music").await?;
+    parse_music_search_value(&answer, limit)
 }
 
 /// Reads the song rows of a YouTube Music search answer. Rows without a video id are skipped.
-fn parse_music_search(body: &[u8], limit: usize) -> Result<Vec<Item>> {
+#[cfg_attr(not(any(target_os = "ios", feature = "native-extract")), allow(dead_code))]
+pub(crate) fn parse_music_search(body: &[u8], limit: usize) -> Result<Vec<Item>> {
+    let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
+    parse_music_search_value(&v, limit)
+}
+
+pub(crate) fn parse_music_search_value(v: &serde_json::Value, limit: usize) -> Result<Vec<Item>> {
     use serde_json::Value;
-    let v: Value = serde_json::from_slice(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
     let sections = v
         .pointer("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents")
         .and_then(Value::as_array)
@@ -475,7 +482,7 @@ fn song_score(it: &Item) -> i32 {
 /// length, so those are copied from the matching ordinary result when there is one.
 /// Ordinary results are added only when there are too few songs, best audio first,
 /// so a video is shown only when no song exists.
-fn merge(songs: Vec<Item>, mut general: Vec<Item>, limit: usize) -> Vec<Item> {
+pub(crate) fn merge(songs: Vec<Item>, mut general: Vec<Item>, limit: usize) -> Vec<Item> {
     const ENOUGH: usize = 5;
     let mut out: Vec<Item> = Vec::with_capacity(limit);
     for mut s in songs {

@@ -225,14 +225,6 @@ pub(crate) async fn curl_get(url: &str, user_agent: &str, max_secs: u32) -> Resu
     curl_run(c).await
 }
 
-/// POSTs a JSON body and returns the answer. `--compressed` keeps big answers small.
-pub(crate) async fn curl_post_json(url: &str, body: &str, max_secs: u32) -> Result<Vec<u8>> {
-    let mut c = curl();
-    c.args(["--max-time", &max_secs.to_string(), "--compressed", "-H", "Content-Type: application/json"]);
-    c.args(["--data-raw", body, url]);
-    curl_run(c).await
-}
-
 const SUGGEST_URL: &str = "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&hl=en&q=";
 
 /// Search suggestions for what the user has typed so far, best first. Short
@@ -242,14 +234,25 @@ pub async fn suggest(query: &str) -> Result<Vec<String>> {
     if q.is_empty() || q.chars().count() > 100 || q.chars().any(char::is_control) {
         return Ok(Vec::new());
     }
-    let mut c = curl();
-    c.args(["--max-time", "4"]).arg(format!("{SUGGEST_URL}{}", crate::youtube::url_encode(q)));
-    parse_suggestions(&curl_run(c).await?)
+    // In process: the search box also works where curl cannot run (iOS).
+    let url = format!("{SUGGEST_URL}{}", crate::youtube::url_encode(q));
+    let answer = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        crate::native::http::get_json(&url, &[("User-Agent", crate::native::http::DESKTOP_UA)], 256 * 1024, "Google"),
+    )
+    .await
+    .map_err(|_| ProviderError::Tool("the suggestion service took too long".into()))??;
+    parse_suggestions_value(&answer)
 }
 
 /// The answer is `["typed", ["suggestion", ...], ...]`.
+#[cfg(test)]
 fn parse_suggestions(body: &[u8]) -> Result<Vec<String>> {
     let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
+    parse_suggestions_value(&v)
+}
+
+fn parse_suggestions_value(v: &serde_json::Value) -> Result<Vec<String>> {
     Ok(v.get(1)
         .and_then(|a| a.as_array())
         .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
@@ -267,9 +270,16 @@ pub async fn fetch_thumbnail(url: &str) -> Result<Vec<u8>> {
     if !ok {
         return Err(ProviderError::Invalid("not a YouTube thumbnail link".to_string()));
     }
-    let mut c = curl();
-    c.args(["--max-time", "10", "--max-filesize", "1000000"]).arg(url);
-    curl_run(c).await
+    let mut reply = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        crate::native::http::get(url, &[("User-Agent", crate::native::http::DESKTOP_UA)]),
+    )
+    .await
+    .map_err(|_| ProviderError::Tool("the cover took too long".into()))??;
+    if reply.status != 200 {
+        return Err(ProviderError::Tool(format!("the cover server answered {}", reply.status)));
+    }
+    reply.bytes(1_000_000).await
 }
 
 /// The hash listed for the yt-dlp program in a `SHA2-256SUMS` file.

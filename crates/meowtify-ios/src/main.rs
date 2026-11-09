@@ -1,10 +1,9 @@
 //! iOS entry point.
 //!
-//! Phase 2: the shared app (core, library, player, UI) on a phone, with local files only.
-//! Left out on purpose, each for a reason:
-//! - yt-dlp, downloads, YouTube, SoundCloud, Audius, autoplay: they need yt-dlp, and iOS cannot
-//!   run a subprocess. Phase 3 replaces that with in-process code.
-//! - Discord, deep links, the single-instance socket, self-update: desktop ideas.
+//! Phase 3: the shared app (core, library, player, UI) on a phone, with search and
+//! downloads through the in-process providers. There is no yt-dlp, ffmpeg or curl on iOS,
+//! so `meowtify_provider::native_providers` supplies YouTube, SoundCloud and Audius.
+//! Left out on purpose: Discord, deep links, the single-instance socket, self-update.
 
 #[cfg(target_os = "ios")]
 mod app {
@@ -12,9 +11,11 @@ mod app {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use meowtify_autoplay::{Autoplay, Control};
     use meowtify_core::{run, AppHandle, Command, MetadataSource, PlaybackEngine};
     use meowtify_library::{config_dir, Library, Settings};
     use meowtify_player::LocalPlayer;
+    use meowtify_provider::DownloadManager;
     use meowtify_ui::Services;
 
     /// The app's Documents folder. Info.plist shares it with the Files app, so the user
@@ -50,6 +51,11 @@ mod app {
         let engine: Arc<dyn PlaybackEngine> = Arc::new(LocalPlayer::new(library.clone()));
         let source: Arc<dyn MetadataSource> = library.clone();
 
+        // The saved proxy applies to the in-process client from the first request.
+        if let Err(e) = meowtify_provider::set_proxy(&settings.proxy) {
+            eprintln!("ignoring the saved proxy: {e}");
+        }
+
         let rt_handle = rt.handle().clone();
         let (handle, commands) = AppHandle::new(32, 64);
         let events = handle.subscribe();
@@ -67,17 +73,27 @@ mod app {
             }
         });
 
+        // Search and downloads run in process; there is no yt-dlp to point Settings at.
+        let (provider, fallbacks) = meowtify_provider::native_providers();
+        let downloads = Some(DownloadManager::start(provider.clone(), &rt_handle, meowtify_ui::downloads_notifier()));
+
+        let control = Control::new(settings.autoplay, settings.autoplay_ahead, settings.autoplay_behind, &settings.lastfm_key);
+        let autoplay = Autoplay::start(&rt_handle, handle.clone(), library.clone(), provider, fallbacks, control);
+        let autoplay_control = Some(autoplay.control());
+
         let services = Services {
             source,
             library: Some(library),
-            downloads: None,
+            downloads,
             yt_dlp: None,
             discord: None,
-            autoplay: None,
+            autoplay: autoplay_control,
             open_links: None,
             settings,
         };
-        if let Err(e) = meowtify_ui::run(handle, services, events, rt_handle) {
+        let result = meowtify_ui::run(handle, services, events, rt_handle);
+        autoplay.stop();
+        if let Err(e) = result {
             eprintln!("ui error: {e}");
         }
     }

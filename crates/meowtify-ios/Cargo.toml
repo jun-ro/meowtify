@@ -17,6 +17,8 @@ software = []
 meowtify-core = { path = "../meowtify-core" }
 meowtify-library = { path = "../meowtify-library" }
 meowtify-player = { path = "../meowtify-player" }
+meowtify-provider = { path = "../meowtify-provider" }
+meowtify-autoplay = { path = "../meowtify-autoplay" }
 meowtify-ui = { path = "../meowtify-ui" }
 slint = { workspace = true, features = ["backend-winit", "renderer-skia", "renderer-software"] }
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }

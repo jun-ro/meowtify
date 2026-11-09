@@ -1,11 +1,13 @@
 //! Audius: music uploaded by independent artists, with a public API that needs no key and
-//! streams plain MP3 files. No yt-dlp or ffmpeg involved, so it is the lightest provider.
+//! streams plain MP3 files. No yt-dlp or ffmpeg involved, and no subprocess either: the
+//! request goes through the in-process HTTP client so the same code runs on iOS.
 
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde_json::Value;
 
+use crate::native::{fetch, http};
 use crate::youtube::url_encode;
 use crate::{Item, ProgressFn, Provider, ProviderError, Result};
 
@@ -13,6 +15,7 @@ const API: &str = "https://api.audius.co/v1";
 const APP: &str = "Meowtify";
 const MAX_QUERY: usize = 200;
 const MAX_SEARCH: u32 = 25;
+const MIN_AUDIO: u64 = 32 * 1024;
 
 pub struct Audius;
 
@@ -24,8 +27,9 @@ impl Provider for Audius {
             return Err(ProviderError::Invalid("enter a search of 1 to 200 characters".into()));
         }
         let n = limit.clamp(1, MAX_SEARCH);
-        let body = crate::ytdlp::curl_text(&format!("{API}/tracks/search?query={}&limit={n}&app_name={APP}", url_encode(q))).await?;
-        parse_search(body.as_bytes())
+        let url = format!("{API}/tracks/search?query={}&limit={n}&app_name={APP}", url_encode(q));
+        let answer = http::get_json(&url, &[("User-Agent", http::DESKTOP_UA)], 4 * 1024 * 1024, "Audius").await?;
+        Ok(parse_search_value(&answer))
     }
 
     async fn resolve(&self, _url: &str) -> Result<Vec<Item>> {
@@ -39,19 +43,15 @@ impl Provider for Audius {
         std::fs::create_dir_all(dest_dir).map_err(|e| ProviderError::Io(e.to_string()))?;
         let dest = dest_dir.join(file_name(item));
         let part = dest.with_extension("mp3.part");
+        let guard = fetch::PartFile::new(part.clone());
         let url = format!("{API}/tracks/{}/stream?app_name={APP}", item.id);
-        let got = crate::ytdlp::curl_file(&url, &part).await;
-        if let Err(e) = got {
-            let _ = std::fs::remove_file(&part);
-            return Err(e);
-        }
+        let len = fetch::download_plain(&url, &[("User-Agent", http::DESKTOP_UA)], &part, progress.clone()).await?;
         // A short file is an error page or a cut connection, not a song.
-        let len = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
-        if len < 32 * 1024 {
-            let _ = std::fs::remove_file(&part);
+        if len < MIN_AUDIO {
             return Err(ProviderError::Tool("Audius sent no audio for this track".into()));
         }
         std::fs::rename(&part, &dest).map_err(|e| ProviderError::Io(e.to_string()))?;
+        guard.keep();
         progress(100.0);
         Ok(dest)
     }
@@ -78,31 +78,35 @@ fn file_name(item: &Item) -> String {
     format!("{title} [{}].mp3", item.id)
 }
 
+#[cfg(test)]
 fn parse_search(body: &[u8]) -> Result<Vec<Item>> {
     let v: Value = serde_json::from_slice(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
     let rows = v.get("data").and_then(Value::as_array).ok_or_else(|| ProviderError::Parse("no data".into()))?;
-    Ok(rows
-        .iter()
-        .filter_map(|r| {
-            let id = r.get("id")?.as_str().filter(|i| valid_id(i))?.to_string();
-            let title = r.get("title")?.as_str()?.to_string();
-            // Tracks that cannot be streamed (blocked, or removed) have no use here.
-            if r.get("is_streamable").and_then(Value::as_bool) == Some(false) {
-                return None;
-            }
-            let artist = r.pointer("/user/name").and_then(Value::as_str).unwrap_or("").to_string();
-            let permalink = r.get("permalink").and_then(Value::as_str).unwrap_or("");
-            Some(Item {
-                provider: "audius",
-                url: format!("https://audius.co{permalink}"),
-                duration_secs: r.get("duration").and_then(Value::as_u64).map(|d| d as u32),
-                thumbnail: None,
-                id,
-                title,
-                artist,
-            })
-        })
-        .collect())
+    Ok(rows.iter().filter_map(item).collect())
+}
+
+fn parse_search_value(v: &Value) -> Vec<Item> {
+    v.get("data").and_then(Value::as_array).into_iter().flatten().filter_map(item).collect()
+}
+
+fn item(r: &Value) -> Option<Item> {
+    let id = r.get("id")?.as_str().filter(|i| valid_id(i))?.to_string();
+    let title = r.get("title")?.as_str()?.to_string();
+    // Tracks that cannot be streamed (blocked, or removed) have no use here.
+    if r.get("is_streamable").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    let artist = r.pointer("/user/name").and_then(Value::as_str).unwrap_or("").to_string();
+    let permalink = r.get("permalink").and_then(Value::as_str).unwrap_or("");
+    Some(Item {
+        provider: "audius",
+        url: format!("https://audius.co{permalink}"),
+        duration_secs: r.get("duration").and_then(Value::as_u64).map(|d| d as u32),
+        thumbnail: None,
+        id,
+        title,
+        artist,
+    })
 }
 
 #[cfg(test)]

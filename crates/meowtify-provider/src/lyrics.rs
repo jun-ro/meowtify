@@ -194,7 +194,23 @@ fn is_not_found(e: &ProviderError) -> bool {
 }
 
 async fn ask(query: &str) -> Result<Vec<u8>> {
-    crate::ytdlp::curl_get(&format!("{API}/{query}"), USER_AGENT, REQUEST_SECS).await
+    let url = format!("{API}/{query}");
+    let reply = tokio::time::timeout(
+        std::time::Duration::from_secs(REQUEST_SECS as u64),
+        crate::native::http::get(&url, &[("User-Agent", USER_AGENT)]),
+    )
+    .await
+    .map_err(|_| ProviderError::Tool("LRCLIB took too long".into()))??;
+    let status = reply.status;
+    let mut reply = reply;
+    let body = reply.bytes(2 * 1024 * 1024).await?;
+    if status == 404 {
+        return Err(ProviderError::Tool("LRCLIB 404".into()));
+    }
+    if status != 200 {
+        return Err(crate::native::http::status_error("LRCLIB", status, &body));
+    }
+    Ok(body)
 }
 
 /// Asks LRCLIB. `Ok(None)` means it has nothing for this song.
