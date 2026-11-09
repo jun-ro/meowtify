@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use meowtify_core::growth;
-use meowtify_jam::proto::{audio_frame, Action, HostState, Perms, Signal, SongId, SongRef, ToGuest, ToHost, AUDIO_HEADER, MAX_QUEUE};
+use meowtify_jam::proto::{audio_frame, Action, HostState, Perms, SharedLyrics, Signal, SongId, SongRef, ToGuest, ToHost, AUDIO_HEADER, MAX_QUEUE};
 use meowtify_jam::{ClientMsg, Member, MemberId, ServerMsg, Target};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::mpsc;
@@ -37,6 +37,8 @@ pub struct SongInfo {
     pub duration_ms: u32,
     /// The id in the file's name, if it has one. Sent to guests; see `SongRef::key`.
     pub key: Option<String>,
+    /// Who queued the song; see `SongRef::by`.
+    pub by: Option<u32>,
 }
 
 /// What the host's player is doing, whenever it changes.
@@ -74,7 +76,7 @@ pub enum HostEvent {
     /// A guest with the right to control playback asked for this. The app carries it out.
     Do { from: String, action: Action },
     /// A guest suggested a song.
-    Suggest { from: String, text: String },
+    Suggest { from: String, id: MemberId, text: String },
     /// The relay connection dropped, with the reason. It is trying again.
     Reconnecting(String),
     /// The jam is over for the host.
@@ -83,6 +85,7 @@ pub enum HostEvent {
 
 enum Cmd {
     Publish(Snapshot),
+    Lyrics(PathBuf, SharedLyrics),
     SetPerms(MemberId, Perms),
     Kick(MemberId),
     End,
@@ -111,6 +114,11 @@ impl Host {
     /// The player changed: tell the guests.
     pub fn publish(&self, snapshot: Snapshot) {
         let _ = self.cmds.send(Cmd::Publish(snapshot));
+    }
+
+    /// The words of the song at `path`, for the guests. Sent again to a guest that joins later.
+    pub fn share_lyrics(&self, path: PathBuf, lyrics: SharedLyrics) {
+        let _ = self.cmds.send(Cmd::Lyrics(path, lyrics.capped()));
     }
 
     pub fn set_perms(&self, id: MemberId, perms: Perms) {
@@ -157,7 +165,7 @@ impl Songs {
     }
 
     fn reference(&mut self, s: &SongInfo) -> SongRef {
-        SongRef { id: self.id_of(&s.path), title: s.title.clone(), artist: s.artist.clone(), duration_ms: s.duration_ms, key: s.key.clone() }
+        SongRef { id: self.id_of(&s.path), title: s.title.clone(), artist: s.artist.clone(), duration_ms: s.duration_ms, key: s.key.clone(), by: s.by }
     }
 }
 
@@ -192,6 +200,8 @@ struct Actor {
     snapshot: Snapshot,
     snapshot_at: u64,
     next_generation: u64,
+    /// The words of the song last shared, with its number.
+    lyrics: Option<(SongId, SharedLyrics)>,
 }
 
 impl Actor {
@@ -206,6 +216,7 @@ impl Actor {
             snapshot: Snapshot::default(),
             snapshot_at: 0,
             next_generation: 1,
+            lyrics: None,
         }
     }
 
@@ -234,6 +245,15 @@ impl Actor {
                     let Some(cmd) = cmd else { return };
                     match cmd {
                         Cmd::Publish(s) => self.publish(s).await,
+                        Cmd::Lyrics(path, lyrics) => {
+                            let song = self.songs.id_of(&path);
+                            self.lyrics = Some((song, lyrics.clone()));
+                            let msg = ToGuest::Lyrics { song, lyrics };
+                            let links: Vec<Arc<Link>> = self.guests.values().filter(|g| g.open).filter_map(|g| g.link.clone()).collect();
+                            for link in links {
+                                send_control(&link, &msg).await;
+                            }
+                        }
                         Cmd::SetPerms(id, perms) => {
                             if let Some(g) = self.guests.get_mut(&id) {
                                 g.perms = perms;
@@ -367,6 +387,9 @@ impl Actor {
                 if let Some(link) = g.link.clone() {
                     send_control(&link, &ToGuest::Perms(g.perms)).await;
                     send_control(&link, &ToGuest::State(self.current_state())).await;
+                    if let Some((song, lyrics)) = &self.lyrics {
+                        send_control(&link, &ToGuest::Lyrics { song: *song, lyrics: lyrics.clone() }).await;
+                    }
                 }
                 self.members_changed();
             }
@@ -421,7 +444,7 @@ impl Actor {
                 }
                 let from = g.name.clone();
                 let _ = self.events.send(match action {
-                    Action::Suggest { text } => HostEvent::Suggest { from, text },
+                    Action::Suggest { text } => HostEvent::Suggest { from, id, text },
                     action => HostEvent::Do { from, action },
                 });
             }

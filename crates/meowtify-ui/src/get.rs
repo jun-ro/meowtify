@@ -186,6 +186,8 @@ pub(crate) struct Get {
     top_timer: slint::Timer,
     /// Jobs whose file is already in the library.
     added: RefCell<std::collections::HashSet<u64>>,
+    /// Video ids of songs being saved that go to the queue as soon as they are in the library.
+    queue_after: RefCell<Vec<(String, u32)>>,
 }
 
 fn duration_text(secs: Option<u32>) -> String {
@@ -248,6 +250,7 @@ impl Get {
             hover_timer: slint::Timer::default(),
             top_timer: slint::Timer::default(),
             added: RefCell::new(std::collections::HashSet::new()),
+            queue_after: RefCell::new(Vec::new()),
         });
         {
             let weak = Rc::downgrade(&get);
@@ -809,9 +812,79 @@ impl Get {
         self.update_result_states();
     }
 
+    /// Songs saved for the queue that the library has now go to the queue.
+    fn queue_saved(&self) {
+        let Some(library) = &self.library else { return };
+        let ready: Vec<(String, Arc<str>, u32)> = self
+            .queue_after
+            .borrow()
+            .iter()
+            .filter_map(|(id, by)| library.find_by_video_id(id).map(|t| (id.clone(), t.uri.clone(), *by)))
+            .collect();
+        for (id, uri, by) in ready {
+            self.queue_after.borrow_mut().retain(|(x, _)| *x != id);
+            crate::jam::note_adder(&uri, by);
+            (self.send)(Command::Enqueue { uri, place: meowtify_core::Place::Queue });
+            if let Some(w) = self.win.upgrade() {
+                w.set_status("Added the suggested song to the queue".into());
+            }
+        }
+    }
+
+    /// Finds the best match for `text` and puts it in the queue, saving it first when it is not
+    /// in the library yet. For a song a jam guest suggested.
+    pub(crate) fn queue_text(self: &Rc<Self>, text: &str, by: u32) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let provider = self.manager.provider().clone();
+        self.rt.spawn(async move {
+            let result = if text.starts_with("http") { provider.resolve(&text).await } else { provider.search(&text, 1).await };
+            let _ = slint::invoke_from_event_loop(move || {
+                GET.with(|g| {
+                    if let Some(g) = g.borrow().as_ref() {
+                        g.queue_found(result, by);
+                    }
+                });
+            });
+        });
+    }
+
+    fn queue_found(&self, result: Result<Vec<Item>, ProviderError>, by: u32) {
+        let Some(w) = self.win.upgrade() else { return };
+        let Some(item) = result.ok().and_then(|v| v.into_iter().next()) else {
+            w.set_status("Could not find that suggestion.".into());
+            return;
+        };
+        let Some(library) = &self.library else { return };
+        if let Some(track) = library.find_by_video_id(&item.id) {
+            crate::jam::note_adder(&track.uri, by);
+            (self.send)(Command::Enqueue { uri: track.uri.clone(), place: meowtify_core::Place::Queue });
+            w.set_status(format!("Added \u{201c}{}\u{201d} to the queue", item.title).into());
+            return;
+        }
+        let Some(dir) = library.dir() else {
+            w.set_yt_status("Choose a music folder in Settings first.".into());
+            w.set_view(1);
+            return;
+        };
+        w.set_status(format!("Saving \u{201c}{}\u{201d} for the queue\u{2026}", item.title).into());
+        {
+            let mut after = self.queue_after.borrow_mut();
+            if after.len() >= 8 {
+                after.remove(0);
+            }
+            after.push((item.id.clone(), by));
+        }
+        self.manager.enqueue_next(item, dir);
+        self.update_result_states();
+    }
+
     /// Called after every library rescan. Starts the song the user is waiting for.
     pub(crate) fn library_ready(&self) {
         self.rescanning.set(false);
+        self.queue_saved();
         let Some(id) = self.awaiting.borrow().clone() else { return };
         let Some(library) = &self.library else { return };
         if let Some(track) = library.find_by_video_id(&id) {

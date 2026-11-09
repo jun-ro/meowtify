@@ -57,6 +57,12 @@ pub(crate) fn swatch(hue: u16) -> slint::Color {
     slint::Color::from_rgb_u8(r, g, b)
 }
 
+/// The colour of a person's cat: the chosen hue, else the one their name gives.
+pub(crate) fn color(name: &str, hue: Option<u16>) -> slint::Color {
+    let [r, g, b] = hsl(hue.map_or_else(|| hue_of(name), f32::from), 0.70, 0.65);
+    slint::Color::from_rgb_u8(r, g, b)
+}
+
 /// A hue in degrees. FNV-1a over the lower case name; hashing spreads similar names apart.
 fn hue_of(name: &str) -> f32 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;

@@ -43,6 +43,9 @@ export struct UpNext {
     artist: string,
     kind: int,
     art: image,
+    /// In a jam: the bar beside the song has this colour, the cat colour of whoever queued it.
+    has-mark: bool,
+    mark: color,
 }
 
 /// One person in a jam. state: "connected", "connecting…" or "offline".
@@ -783,6 +786,7 @@ export component MainWindow inherits Window {
     callback jam-accept-invite();
     callback jam-dismiss-invite();
     callback jam-search(int);
+    callback jam-add(int);
     callback pick-cover();
     callback clear-cover();
     /// "Added" feedback: a toast over the player bar and a chip that flies into it.
@@ -1934,7 +1938,8 @@ export component MainWindow inherits Window {
                                     HorizontalLayout {
                                         spacing: 10px;
                                         Label { text: sug; color: Theme.text; font-size: 16px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; preferred-width: 0px; }
-                                        Pill { text: "Search"; clicked => { root.jam-search(idx); } }
+                                        Pill { text: "Search"; primary: false; clicked => { root.jam-search(idx); } }
+                                        Pill { text: "Add to queue"; clicked => { root.jam-add(idx); } }
                                     }
                                 }
                             }
@@ -2364,7 +2369,7 @@ export component MainWindow inherits Window {
                         x: 0;
                         width: 4px;
                         border-radius: 2px;
-                        background: item.kind == 0 ? Theme.accent : transparent;
+                        background: item.has-mark ? item.mark : (item.kind == 0 ? Theme.accent : transparent);
                     }
                     HorizontalLayout {
                         x: 10px;

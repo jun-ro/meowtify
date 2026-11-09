@@ -30,7 +30,7 @@ async fn relay() -> String {
 }
 
 fn song(path: &PathBuf, title: &str) -> SongInfo {
-    SongInfo { path: path.clone(), title: title.into(), artist: "Artist".into(), duration_ms: 200_000, key: None }
+    SongInfo { path: path.clone(), title: title.into(), artist: "Artist".into(), duration_ms: 200_000, key: None, by: None }
 }
 
 /// A song file of a size that takes many chunks.
@@ -119,7 +119,7 @@ async fn a_guest_gets_the_song_follows_the_host_and_is_held_to_its_rights() {
     guest.request(Action::Pause);
     guest_until(&mut guest_events, "denial", |e| matches!(e, GuestEvent::Denied(_))).await;
     guest.request(Action::Suggest { text: "tsubi club".into() });
-    host_until(&mut host_events, "suggestion", |e| matches!(e, HostEvent::Suggest { from, text } if from == "Ann" && text == "tsubi club")).await;
+    host_until(&mut host_events, "suggestion", |e| matches!(e, HostEvent::Suggest { from, text, .. } if from == "Ann" && text == "tsubi club")).await;
 
     // With the right, the same request goes through.
     host.set_perms(ann.id, Perms { control: true, ..Perms::LISTENER });

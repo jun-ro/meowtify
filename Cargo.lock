@@ -3190,7 +3190,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "meowtify-autoplay",
@@ -3207,7 +3207,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-autoplay"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "meowtify-core",
  "meowtify-library",
@@ -3227,7 +3227,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-cli"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "meowtify-library",
  "meowtify-provider",
@@ -3237,7 +3237,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "tokio",
@@ -3245,7 +3245,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-discord"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "meowtify-core",
  "serde_json",
@@ -3255,7 +3255,7 @@ dependencies = [
 [[package]]
 name = "meowtify-jam"
 version = "0.1.0"
-source = "git+https://github.com/jun-ro/meowtify-relay?tag=v0.1.0#f911bd7da431f9b65d7a5cb14ac847c6603442eb"
+source = "git+https://github.com/jun-ro/meowtify-relay?tag=v0.1.2#977e810433ba7b7f26ca8fc55a10ad3beb37c6f1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3263,7 +3263,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-jam-net"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3281,7 +3281,7 @@ dependencies = [
 [[package]]
 name = "meowtify-jam-relay"
 version = "0.1.0"
-source = "git+https://github.com/jun-ro/meowtify-relay?tag=v0.1.0#f911bd7da431f9b65d7a5cb14ac847c6603442eb"
+source = "git+https://github.com/jun-ro/meowtify-relay?tag=v0.1.2#977e810433ba7b7f26ca8fc55a10ad3beb37c6f1"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
@@ -3297,7 +3297,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-library"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "lofty",
@@ -3308,7 +3308,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-player"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "meowtify-core",
@@ -3319,7 +3319,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-plugin"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3329,7 +3329,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-plugin-compile"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "meowtify-plugin",
  "wasmtime",
@@ -3337,7 +3337,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-plugin-tests"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "meowtify-plugin",
  "wasmtime",
@@ -3345,7 +3345,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-provider"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "meowtify-core",
@@ -3357,7 +3357,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-ui"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "getrandom 0.3.4",
  "gif",
@@ -3377,7 +3377,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-ui-view"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "slint",
  "slint-build",
@@ -4134,7 +4134,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -7412,7 +7412,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

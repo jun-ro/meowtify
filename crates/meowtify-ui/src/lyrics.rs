@@ -42,6 +42,8 @@ struct State {
     rows: Rc<VecModel<LyricRow>>,
     win: slint::Weak<MainWindow>,
     rt: tokio::runtime::Handle,
+    /// Words a jam host sent for the song at this path. They are used instead of a lookup.
+    shared: Option<(Arc<str>, Lyrics)>,
 }
 
 thread_local! {
@@ -56,7 +58,7 @@ pub(crate) fn install(win: &MainWindow, rt: tokio::runtime::Handle) {
     let rows = Rc::new(VecModel::<LyricRow>::default());
     win.set_lyrics_rows(ModelRc::from(rows.clone()));
     STATE.with(|s| {
-        *s.borrow_mut() = Some(State { uri: None, track: None, pos_ms: 0, lyrics: None, status: Status::Idle, generation: 0, shown: None, rows, win: win.as_weak(), rt });
+        *s.borrow_mut() = Some(State { uri: None, track: None, pos_ms: 0, lyrics: None, status: Status::Idle, generation: 0, shown: None, rows, win: win.as_weak(), rt, shared: None });
     });
     let weak = win.as_weak();
     win.on_toggle_lyrics(move || {
@@ -94,9 +96,44 @@ pub(crate) fn on_playback(w: &MainWindow, state: Option<&PlaybackState>) {
     .unwrap_or(false);
     if changed {
         w.set_lyrics_note(slint::SharedString::default());
+        use_shared(w);
     }
     if w.get_lyrics_open() {
         refresh(w);
+    }
+}
+
+/// The jam host sent the words of the song at `path`. They are shown when that song plays,
+/// without any lookup. `None` forgets them (the jam is over).
+pub(crate) fn offer(w: &MainWindow, shared: Option<(&str, Lyrics)>) {
+    with(|st| st.shared = shared.map(|(p, l)| (Arc::from(p), l)));
+    use_shared(w);
+}
+
+/// Puts the host's words in place when they belong to the song that plays.
+fn use_shared(w: &MainWindow) {
+    let note = with(|st| {
+        let (Some(uri), Some((path, lyrics))) = (&st.uri, &st.shared) else { return None };
+        if **uri != **path {
+            return None;
+        }
+        let (lyrics, note) = match lyrics {
+            Lyrics::Synced(l) => (Lyrics::Synced(l.clone()), ""),
+            Lyrics::Plain(l) => (Lyrics::Plain(l.clone()), "These lyrics have no times, so they do not follow the song."),
+            Lyrics::Instrumental => (Lyrics::Instrumental, "Instrumental: this song has no words."),
+        };
+        st.lyrics = Some(lyrics);
+        st.status = Status::Done;
+        st.generation += 1; // a lookup that is still running is no longer wanted
+        st.shown = None;
+        Some(note)
+    })
+    .flatten();
+    if let Some(note) = note {
+        w.set_lyrics_note(note.into());
+        if w.get_lyrics_open() {
+            show();
+        }
     }
 }
 

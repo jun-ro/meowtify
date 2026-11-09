@@ -46,7 +46,7 @@ thread_local! {
     /// The browser lives on the UI thread. Worker results find it here.
     static BROWSER: RefCell<Option<Rc<Browser>>> = const { RefCell::new(None) };
     /// What the queue panel shows now, so an unchanged queue does not reset its scroll position.
-    static UP_NEXT: RefCell<Vec<(String, i32)>> = const { RefCell::new(Vec::new()) };
+    static UP_NEXT: RefCell<Vec<(String, i32, Option<slint::Color>)>> = const { RefCell::new(Vec::new()) };
     /// The `Queue::rev` the panel was built from. The queue arrives every second; this tells an
     /// unchanged one apart without building anything.
     static UP_NEXT_REV: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -312,7 +312,7 @@ pub fn run(
         let send = send.clone();
         let browser = browser.clone();
         win.on_jump_to(move |i| {
-            let uri = usize::try_from(i).ok().and_then(|i| UP_NEXT.with(|c| c.borrow().get(i).map(|(u, _)| u.clone())));
+            let uri = usize::try_from(i).ok().and_then(|i| UP_NEXT.with(|c| c.borrow().get(i).map(|(u, _, _)| u.clone())));
             if let Some(uri) = uri {
                 let title = UP_NEXT_MODEL.with(|m| {
                     m.borrow().as_ref().and_then(|m| m.row_data(i as usize)).map(|r| r.title.to_string()).unwrap_or_default()
@@ -608,6 +608,8 @@ pub fn run(
     THUMBS.with(|t| *t.borrow_mut() = None);
     MASCOT.with(|m| *m.borrow_mut() = None);
     get::GET.with(|g| *g.borrow_mut() = None);
+    // The jam holds a handle to the player; dropping it lets the player's tasks end.
+    jam::clear();
     result
 }
 
@@ -872,9 +874,72 @@ fn grey_art() -> Image {
     Image::from_rgba8(ph)
 }
 
+/// The cover of a YouTube video: the saved one, or grey while it loads.
+fn cover_of(video_id: &str) -> Image {
+    match THUMBS.with(|th| th.borrow().as_ref().and_then(|t| t.cached(video_id))) {
+        Some(img) => img,
+        None => {
+            THUMBS.with(|th| {
+                if let Some(th) = th.borrow().as_ref() {
+                    th.fetch(video_id, &meowtify_core::youtube_thumbnail(video_id));
+                }
+            });
+            grey_art()
+        }
+    }
+}
+
+/// A video id a jam host sent is used only when it has the form of a YouTube id.
+fn valid_video_id(id: &str) -> bool {
+    id.len() == 11 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// A song of the host's queue as a jam guest shows it.
+#[derive(Clone, PartialEq)]
+pub(crate) struct JamQueueRow {
+    pub title: String,
+    pub artist: String,
+    /// The video id of the cover, if the host sent one.
+    pub key: Option<String>,
+    /// The cat colour of whoever queued the song.
+    pub mark: Option<slint::Color>,
+}
+
+/// Fills the queue panel of a jam guest with the host's queue.
+pub(crate) fn show_jam_queue(w: &MainWindow, songs: &[JamQueueRow]) {
+    let mut vids: Vec<Option<String>> = Vec::with_capacity(songs.len());
+    let mut rows: Vec<UpNext> = Vec::with_capacity(songs.len());
+    for JamQueueRow { title, artist, key, mark } in songs.iter().take(UP_NEXT_SHOWN) {
+        let vid = key.clone().filter(|k| valid_video_id(k));
+        let art = match &vid {
+            Some(v) => cover_of(v),
+            None => Image::from_rgba8(make_art(art_key(&format!("{title}\n{artist}")))),
+        };
+        vids.push(vid);
+        rows.push(UpNext {
+            title: title.as_str().into(),
+            artist: artist.as_str().into(),
+            kind: if mark.is_some() { 0 } else { 1 },
+            art,
+            has_mark: mark.is_some(),
+            mark: mark.unwrap_or_default(),
+        });
+    }
+    let model = Rc::new(VecModel::from(rows));
+    UP_NEXT_MODEL.with(|m| *m.borrow_mut() = Some(model.clone()));
+    UP_NEXT_VIDS.with(|v| *v.borrow_mut() = vids);
+    w.set_up_next(ModelRc::from(model));
+    // The next real queue event must draw again.
+    UP_NEXT.with(|c| c.borrow_mut().clear());
+    UP_NEXT_REV.set(0);
+}
+
 /// Fills the queue panel: the songs the user queued, then autoplay's, then the rest.
 fn set_up_next(w: &MainWindow, q: &meowtify_core::Queue) {
     w.set_autoplay_busy(AUTOPLAY.with(|a| a.borrow().as_ref().is_some_and(|c| c.busy())));
+    if jam::is_guest() {
+        return; // the queue panel shows the host's queue
+    }
     if q.rev != 0 && UP_NEXT_REV.get() == q.rev {
         return;
     }
@@ -885,31 +950,23 @@ fn set_up_next(w: &MainWindow, q: &meowtify_core::Queue) {
         .enumerate()
         .map(|(i, t)| (t.uri.to_string(), if i < q.manual { 0 } else if i < q.manual + q.auto { 1 } else { 2 }, t))
         .collect();
-    let key: Vec<(String, i32)> = shown.iter().map(|(u, k, _)| (u.clone(), *k)).collect();
+    // In a hosted jam the bar of a queued song has the colour of the cat that queued it.
+    let marks: Vec<Option<slint::Color>> = shown.iter().map(|(u, k, _)| jam::queue_mark(u, *k == 0)).collect();
+    let key: Vec<(String, i32, Option<slint::Color>)> = shown.iter().zip(&marks).map(|((u, k, _), m)| (u.clone(), *k, *m)).collect();
     if UP_NEXT.with(|c| *c.borrow() == key) {
         UP_NEXT_REV.set(q.rev);
         return;
     }
     let mut vids: Vec<Option<String>> = Vec::with_capacity(shown.len());
     let mut rows: Vec<UpNext> = Vec::with_capacity(shown.len());
-    for (_, kind, t) in &shown {
+    for ((_, kind, t), mark) in shown.iter().zip(&marks) {
         let vid = meowtify_core::youtube_id(&t.uri).map(str::to_string);
         let art = match &vid {
-            Some(v) => match THUMBS.with(|th| th.borrow().as_ref().and_then(|t| t.cached(v))) {
-                Some(img) => img,
-                None => {
-                    THUMBS.with(|th| {
-                        if let Some(th) = th.borrow().as_ref() {
-                            th.fetch(v, &meowtify_core::youtube_thumbnail(v));
-                        }
-                    });
-                    grey_art()
-                }
-            },
+            Some(v) => cover_of(v),
             None => Image::from_rgba8(make_art(art_id(t))),
         };
         vids.push(vid);
-        rows.push(UpNext { title: t.name.as_ref().into(), artist: artist_line(t).into(), kind: *kind, art });
+        rows.push(UpNext { title: t.name.as_ref().into(), artist: artist_line(t).into(), kind: *kind, art, has_mark: mark.is_some(), mark: mark.unwrap_or_default() });
     }
     let model = Rc::new(VecModel::from(rows));
     UP_NEXT_MODEL.with(|m| *m.borrow_mut() = Some(model.clone()));
@@ -1004,20 +1061,12 @@ fn apply_event(w: &MainWindow, event: Event) {
 /// Shows the cover of the song that just started: its thumbnail when the file
 /// has a video id (the disk cache makes this instant), a gradient otherwise.
 fn set_now_art(w: &MainWindow, t: &Track) {
-    match meowtify_core::youtube_id(&t.uri) {
+    // A jam guest plays a cache file with no id in its name; the host sent the id.
+    let from_jam = jam::cover_key(&t.uri).filter(|k| valid_video_id(k));
+    match meowtify_core::youtube_id(&t.uri).map(str::to_string).or(from_jam) {
         Some(v) => {
-            w.set_now_vid(v.into());
-            match THUMBS.with(|th| th.borrow().as_ref().and_then(|t| t.cached(v))) {
-                Some(img) => w.set_now_art(img),
-                None => {
-                    w.set_now_art(grey_art());
-                    THUMBS.with(|th| {
-                        if let Some(th) = th.borrow().as_ref() {
-                            th.fetch(v, &meowtify_core::youtube_thumbnail(v));
-                        }
-                    });
-                }
-            }
+            w.set_now_vid(v.as_str().into());
+            w.set_now_art(cover_of(&v));
         }
         None => {
             w.set_now_vid(SharedString::default());

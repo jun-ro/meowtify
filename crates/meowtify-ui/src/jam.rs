@@ -18,7 +18,8 @@ use std::time::Instant;
 
 use meowtify_core::{AppHandle, Command, Event, Selection, Track};
 use meowtify_jam::follower::{Local, Step};
-use meowtify_jam::proto::{Action, HostState, Perms, SongRef, MAX_QUEUE};
+use meowtify_jam::proto::{Action, HostState, Perms, SharedLyrics, SongId, SongRef, BY_HOST, MAX_QUEUE};
+use meowtify_provider::{LyricLine, Lyrics};
 use meowtify_jam::{JamLink, Member, MemberId};
 use meowtify_jam_net::{
     fetch_ice, Guest, GuestConfig, GuestEvent, Host, HostConfig, HostEvent, LocalCopy, MemberView, Options, RelayConfig, Snapshot, SongInfo,
@@ -38,10 +39,57 @@ const NAME_CHARS: usize = 24;
 
 thread_local! {
     static JAM: RefCell<Option<Rc<Jam>>> = const { RefCell::new(None) };
+    /// The file a guest plays now and the video id of its cover. The cache file has no id in its
+    /// name, so the id the host sent is kept here.
+    static COVER: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
 }
 
 fn current() -> Option<Rc<Jam>> {
     JAM.with(|j| j.borrow().clone())
+}
+
+/// The video id of the cover for a file a guest plays, if the host sent one.
+pub(crate) fn cover_key(uri: &str) -> Option<String> {
+    COVER.with(|c| c.borrow().as_ref().filter(|(path, _)| path == uri).map(|(_, key)| key.clone()))
+}
+
+/// Whether this window is a guest in a jam right now.
+pub(crate) fn is_guest() -> bool {
+    JAM.with(|j| j.borrow().as_ref().is_some_and(|j| j.session.try_borrow().is_ok_and(|s| matches!(*s, Session::Guest(_)))))
+}
+
+/// A guest's suggestion put the song at `uri` in the queue. The queue shows who asked.
+pub(crate) fn note_adder(uri: &str, by: u32) {
+    with(|j| {
+        let mut p = j.player.borrow_mut();
+        if p.adders.len() >= 64 {
+            p.adders.clear();
+        }
+        p.adders.insert(uri.to_string(), by);
+    });
+}
+
+/// The colour of the bar beside a queued song of the host's queue panel: the cat colour of whoever
+/// queued it. `None` outside a hosted jam and for songs people did not queue.
+pub(crate) fn queue_mark(uri: &str, queued_by_people: bool) -> Option<slint::Color> {
+    if !queued_by_people {
+        return None;
+    }
+    let j = current()?;
+    let session = j.session.try_borrow().ok()?;
+    let Session::Host(h) = &*session else { return None };
+    let by = j.player.try_borrow().ok()?.adders.get(uri).copied();
+    Some(match by.and_then(|id| h.guests.iter().find(|g| g.id == id)) {
+        Some(g) => profile::color(&g.name, g.hue),
+        None => profile::color(&h.name, hue_of_setting(j.win.upgrade().map_or(-1, |w| w.get_jam_hue()))),
+    })
+}
+
+/// Lets go of what the module holds, at the end of the program. Dropping the handle to the
+/// player lets the background tasks end, so the process can exit.
+pub(crate) fn clear() {
+    JAM.with(|j| *j.borrow_mut() = None);
+    COVER.with(|c| *c.borrow_mut() = None);
 }
 
 /// Sets the Jam page up. `links` carries `meowtify://jam/…` links that were opened from outside
@@ -93,6 +141,8 @@ pub(crate) fn install(
         generation: Cell::new(0),
         cache_dir,
         invite: RefCell::new(None),
+        shown_queue: RefCell::new(None),
+        shared_for: RefCell::new(None),
     });
     JAM.with(|j| *j.borrow_mut() = Some(jam));
 
@@ -111,6 +161,7 @@ pub(crate) fn install(
     win.on_jam_accept_invite(|| with(|j| j.accept_invite()));
     win.on_jam_dismiss_invite(|| with(|j| j.dismiss_invite()));
     win.on_jam_search(|idx| with(|j| j.search_suggestion(idx)));
+    win.on_jam_add(|idx| with(|j| j.add_suggestion(idx)));
 
     if let Some(mut links) = links {
         rt.spawn(async move {
@@ -154,6 +205,11 @@ struct Player {
     queue: Vec<Track>,
     /// The `Queue::rev` that `queue` was made from.
     queue_rev: u64,
+    /// How many songs at the front of `queue` people put there, the rest being autoplay's.
+    manual: usize,
+    /// Who queued a song, by file, for songs a guest's suggestion put in the queue. Others were
+    /// queued by the host.
+    adders: std::collections::HashMap<String, u32>,
 }
 
 /// The relay did not answer the request for its TURN server, so hiding the address is not possible.
@@ -190,6 +246,10 @@ struct GuestSession {
     /// The song the host is on, for the title of the file when it is played.
     song: Option<SongRef>,
     members: Vec<Member>,
+    /// The words the host sent last, with the song they belong to.
+    lyrics: Option<(SongId, SharedLyrics)>,
+    /// The song that plays here now and its file.
+    now: Option<(SongId, String)>,
 }
 
 struct Jam {
@@ -201,13 +261,17 @@ struct Jam {
     members: Rc<VecModel<JamMember>>,
     suggestions: Rc<VecModel<SharedString>>,
     /// What each suggestion asked for, without the name of who asked.
-    suggestion_texts: RefCell<Vec<String>>,
+    suggestion_texts: RefCell<Vec<(String, MemberId)>>,
     session: RefCell<Session>,
     player: RefCell<Player>,
     /// Counts sessions, so a late event from an earlier one is ignored.
     generation: Cell<u64>,
     cache_dir: PathBuf,
     invite: RefCell<Option<JamLink>>,
+    /// The queue the guest panel shows now, to redraw it only when it changes.
+    shown_queue: RefCell<Option<Vec<crate::JamQueueRow>>>,
+    /// The file whose lyrics the host side looked up last, so each song is looked up once.
+    shared_for: RefCell<Option<Arc<str>>>,
 }
 
 impl Jam {
@@ -366,7 +430,7 @@ impl Jam {
         if generation != self.generation.get() || !matches!(*self.session.borrow(), Session::Starting) {
             return;
         }
-        *self.session.borrow_mut() = Session::Guest(GuestSession { guest, perms: Perms::LISTENER, song: None, members: Vec::new() });
+        *self.session.borrow_mut() = Session::Guest(GuestSession { guest, perms: Perms::LISTENER, song: None, members: Vec::new(), lyrics: None, now: None });
         // The host decides what plays. Own songs and autoplay would only fight it.
         crate::AUTOPLAY.with(|a| {
             if let Some(c) = a.borrow().as_ref() {
@@ -418,10 +482,17 @@ impl Jam {
                 }
             });
         }
+        COVER.with(|c| *c.borrow_mut() = None);
+        *self.shown_queue.borrow_mut() = None;
+        *self.shared_for.borrow_mut() = None;
         if let Some(w) = self.win.upgrade() {
             w.set_jam_mode(0);
             w.set_jam_link(SharedString::default());
             w.set_jam_rights(SharedString::default());
+            if was_guest {
+                crate::show_jam_queue(&w, &[]);
+                crate::lyrics::offer(&w, None);
+            }
         }
         self.status(why);
         self.say(why);
@@ -469,14 +540,14 @@ impl Jam {
                 self.say(&format!("{from} {what}"));
                 self.send(cmd);
             }
-            HostEvent::Suggest { from, text } => {
+            HostEvent::Suggest { from, id, text } => {
                 self.say(&format!("{from} suggests {text}"));
                 let mut texts = self.suggestion_texts.borrow_mut();
                 if texts.len() >= MAX_SUGGESTIONS {
                     texts.remove(0);
                     self.suggestions.remove(0);
                 }
-                texts.push(text.clone());
+                texts.push((text.clone(), id));
                 self.suggestions.push(format!("{from}: {text}").into());
             }
             HostEvent::Reconnecting(why) => self.status(&format!("Lost the relay ({why}). Trying again…")),
@@ -498,7 +569,7 @@ impl Jam {
                     skip: true,
                     add: true,
                 });
-                for g in &h.guests {
+                for g in h.guests.iter().filter(|g| !is_ghost(&g.name, g.online, h.guests.iter().map(|o| (o.name.as_str(), o.online)))) {
                     rows.push(JamMember {
                         id: g.id as i32,
                         name: g.name.as_str().into(),
@@ -517,7 +588,7 @@ impl Jam {
                 }
             }
             Session::Guest(g) => {
-                for m in &g.members {
+                for m in g.members.iter().filter(|m| !is_ghost(&m.name, m.online, g.members.iter().map(|o| (o.name.as_str(), o.online)))) {
                     rows.push(JamMember {
                         id: m.id as i32,
                         name: m.name.as_str().into(),
@@ -554,16 +625,71 @@ impl Jam {
         h.host.set_perms(id, perms);
     }
 
-    fn search_suggestion(&self, idx: i32) {
-        let Ok(idx) = usize::try_from(idx) else { return };
+    /// Takes suggestion `idx` off the list and gives its text and who made it.
+    fn take_suggestion(&self, idx: i32) -> Option<(String, MemberId)> {
+        let idx = usize::try_from(idx).ok()?;
         let text = {
             let mut texts = self.suggestion_texts.borrow_mut();
             if idx >= texts.len() {
-                return;
+                return None;
             }
             texts.remove(idx)
         };
         self.suggestions.remove(idx);
+        Some(text)
+    }
+
+    /// The host accepts a suggestion: the best match goes to the queue.
+    fn add_suggestion(&self, idx: i32) {
+        let Some((text, by)) = self.take_suggestion(idx) else { return };
+        self.say("Looking for the suggested song\u{2026}");
+        crate::get::GET.with(|g| {
+            if let Some(g) = g.borrow().as_ref() {
+                g.queue_text(&text, by);
+            }
+        });
+    }
+
+    /// The words of the song that plays go to the guests, once per song.
+    fn share_lyrics(&self) {
+        let track = match (&*self.session.borrow(), &self.player.borrow().track) {
+            (Session::Host(_), Some(t)) => t.clone(),
+            _ => return,
+        };
+        if self.shared_for.borrow().as_deref() == Some(&*track.uri) {
+            return;
+        }
+        *self.shared_for.borrow_mut() = Some(track.uri.clone());
+        let generation = self.generation.get();
+        self.rt.spawn(async move {
+            let artist = track.artists.first().map(|a| a.name.to_string()).unwrap_or_default();
+            let album = track.album.as_ref().map(|a| a.name.to_string());
+            let file = PathBuf::from(track.uri.as_ref());
+            let query = meowtify_provider::LyricsQuery {
+                title: &track.name,
+                artist: &artist,
+                album: album.as_deref(),
+                duration_secs: track.duration_ms / 1000,
+                audio: file.is_absolute().then_some(file.as_path()),
+            };
+            let cache = meowtify_library::config_dir().join("lyrics");
+            let Ok(Some(found)) = meowtify_provider::find_lyrics(&query, &cache).await else { return };
+            let wire = to_shared(&found);
+            let _ = slint::invoke_from_event_loop(move || with(|j| j.send_lyrics(generation, file, wire)));
+        });
+    }
+
+    fn send_lyrics(&self, generation: u64, path: PathBuf, lyrics: SharedLyrics) {
+        if generation != self.generation.get() {
+            return;
+        }
+        if let Session::Host(h) = &*self.session.borrow() {
+            h.host.share_lyrics(path, lyrics);
+        }
+    }
+
+    fn search_suggestion(&self, idx: i32) {
+        let Some((text, _)) = self.take_suggestion(idx) else { return };
         if let Some(w) = self.win.upgrade() {
             w.set_view(0);
         }
@@ -611,7 +737,9 @@ impl Jam {
                 }
             }
             GuestEvent::Do(step) => self.apply_step(step),
+            GuestEvent::Denied(what) if what.starts_with("you ") => self.say(&what),
             GuestEvent::Denied(what) => self.say(&format!("The host said no: {what}")),
+            GuestEvent::Lyrics { song, lyrics } => self.guest_lyrics(song, lyrics),
             GuestEvent::Reconnecting(why) => self.status(&format!("Lost the relay ({why}). Trying again…")),
             GuestEvent::Down(why) => self.finish(&format!("The jam closed: {why}")),
         }
@@ -621,6 +749,47 @@ impl Jam {
         if let Session::Guest(g) = &mut *self.session.borrow_mut() {
             g.song = state.song.clone();
         }
+        // The queue panel shows what the host will play next.
+        if let Some(w) = self.win.upgrade() {
+            let rows: Vec<crate::JamQueueRow> = {
+                let session = self.session.borrow();
+                let members: &[Member] = match &*session {
+                    Session::Guest(g) => &g.members,
+                    _ => &[],
+                };
+                state
+                    .queue
+                    .iter()
+                    .map(|s| crate::JamQueueRow {
+                        title: s.title.clone(),
+                        artist: s.artist.clone(),
+                        key: s.key.clone(),
+                        mark: s.by.and_then(|by| {
+                            let who = if by == BY_HOST { members.iter().find(|m| m.host) } else { members.iter().find(|m| m.id == by) };
+                            who.map(|m| profile::color(&m.name, m.hue))
+                        }),
+                    })
+                    .collect()
+            };
+            if self.shown_queue.borrow().as_ref() != Some(&rows) {
+                crate::show_jam_queue(&w, &rows);
+                *self.shown_queue.borrow_mut() = Some(rows);
+            }
+        }
+    }
+
+    /// The host sent the words of a song. They show when that song plays here.
+    fn guest_lyrics(&self, song: SongId, lyrics: SharedLyrics) {
+        let path = {
+            let mut session = self.session.borrow_mut();
+            let Session::Guest(g) = &mut *session else { return };
+            let path = g.now.as_ref().filter(|(id, _)| *id == song).map(|(_, p)| p.clone());
+            g.lyrics = Some((song, lyrics.clone()));
+            path
+        };
+        if let (Some(path), Some(w)) = (path, self.win.upgrade()) {
+            crate::lyrics::offer(&w, Some((&path, from_shared(lyrics))));
+        }
     }
 
     fn apply_step(&self, step: Step) {
@@ -628,9 +797,15 @@ impl Jam {
             // The guest crate handles downloads itself; it only reports what to play.
             Step::Want(_) => {}
             Step::Play { song, path, pos_ms, playing } => {
-                let info = match &*self.session.borrow() {
-                    Session::Guest(g) => g.song.clone().filter(|s| s.id == song),
-                    _ => None,
+                let (info, shared) = {
+                    let mut session = self.session.borrow_mut();
+                    match &mut *session {
+                        Session::Guest(g) => {
+                            g.now = Some((song, path.clone()));
+                            (g.song.clone().filter(|s| s.id == song), g.lyrics.clone().filter(|(id, _)| *id == song).map(|(_, l)| l))
+                        }
+                        _ => (None, None),
+                    }
                 };
                 let (title, artist, duration) = match &info {
                     Some(s) => (s.title.as_str(), s.artist.as_str(), s.duration_ms),
@@ -638,6 +813,13 @@ impl Jam {
                 };
                 if let Some(library) = &self.library {
                     library.add_transient(Path::new(&path), title, artist, duration);
+                }
+                // The file has no id in its name; the cover comes from the one the host sent.
+                COVER.with(|c| {
+                    *c.borrow_mut() = info.as_ref().and_then(|s| s.key.clone()).map(|key| (path.clone(), key));
+                });
+                if let Some(w) = self.win.upgrade() {
+                    crate::lyrics::offer(&w, shared.map(|l| (path.as_str(), from_shared(l))));
                 }
                 self.send(Command::PlayFrom(Selection::Single(path.as_str().into())));
                 if pos_ms > 1_000 {
@@ -714,9 +896,13 @@ impl Jam {
                     }
                     p.queue_rev = q.rev;
                     p.queue = q.upcoming.iter().take(MAX_QUEUE).cloned().collect();
+                    p.manual = q.manual.min(p.queue.len());
                 }
                 _ => return,
             }
+        }
+        if matches!(event, Event::PlaybackChanged(Some(_))) {
+            self.share_lyrics();
         }
         let player = self.player.borrow();
         match &mut *self.session.borrow_mut() {
@@ -834,17 +1020,49 @@ impl Gate {
     }
 }
 
-fn snapshot_of(p: &Player) -> Snapshot {
-    Snapshot {
-        current: p.track.as_ref().map(song_info),
-        playing: p.playing,
-        pos_ms: p.pos_ms,
-        queue: p.queue.iter().map(song_info).collect(),
+/// Whether an offline member is only the old copy of someone who is online again under the same
+/// name. A relay without the fix keeps such a copy until its grace time ends; it is not shown.
+fn is_ghost<'a>(name: &str, online: bool, all: impl Iterator<Item = (&'a str, bool)>) -> bool {
+    !online && all.into_iter().any(|(n, on)| on && n.trim().eq_ignore_ascii_case(name.trim()))
+}
+
+/// Lyrics as they go over the wire.
+fn to_shared(l: &Lyrics) -> SharedLyrics {
+    match l {
+        Lyrics::Synced(lines) => SharedLyrics { synced: lines.iter().map(|l| (l.at_ms, l.text.clone())).collect(), ..Default::default() },
+        Lyrics::Plain(lines) => SharedLyrics { plain: lines.clone(), ..Default::default() },
+        Lyrics::Instrumental => SharedLyrics { instrumental: true, ..Default::default() },
     }
 }
 
-fn song_info(t: &Track) -> SongInfo {
+/// Lyrics from the wire, as the lyrics panel holds them.
+fn from_shared(l: SharedLyrics) -> Lyrics {
+    if l.instrumental {
+        Lyrics::Instrumental
+    } else if !l.synced.is_empty() {
+        Lyrics::Synced(l.synced.into_iter().map(|(at_ms, text)| LyricLine { at_ms, text }).collect())
+    } else {
+        Lyrics::Plain(l.plain)
+    }
+}
+
+fn snapshot_of(p: &Player) -> Snapshot {
+    Snapshot {
+        current: p.track.as_ref().map(|t| song_info(t, None)),
+        playing: p.playing,
+        pos_ms: p.pos_ms,
+        queue: p
+            .queue
+            .iter()
+            .enumerate()
+            .map(|(i, t)| song_info(t, (i < p.manual).then(|| p.adders.get(t.uri.as_ref()).copied().unwrap_or(BY_HOST))))
+            .collect(),
+    }
+}
+
+fn song_info(t: &Track, by: Option<u32>) -> SongInfo {
     SongInfo {
+        by,
         path: PathBuf::from(t.uri.as_ref()),
         title: t.name.to_string(),
         artist: crate::artist_line(t),
@@ -939,12 +1157,22 @@ fn copy_to_clipboard(_text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::is_ghost;
+
+    #[test]
+    fn an_offline_copy_of_someone_who_is_back_is_hidden() {
+        let all = [("Ann", false), ("ann ", true), ("Bo", false)];
+        assert!(is_ghost("Ann", false, all.iter().copied()));
+        assert!(!is_ghost("ann ", true, all.iter().copied()), "the online one stays");
+        assert!(!is_ghost("Bo", false, all.iter().copied()), "nobody online under that name");
+    }
+
     use super::*;
     use std::time::Duration;
 
     fn snap(title: &str, playing: bool, pos_ms: u32) -> Snapshot {
         Snapshot {
-            current: Some(SongInfo { path: format!("/{title}").into(), title: title.into(), artist: String::new(), duration_ms: 200_000, key: None }),
+            current: Some(SongInfo { path: format!("/{title}").into(), title: title.into(), artist: String::new(), duration_ms: 200_000, key: None, by: None }),
             playing,
             pos_ms,
             queue: Vec::new(),
@@ -970,7 +1198,7 @@ mod tests {
         let mut gate = Gate::default();
         let mut s = snap("a", true, 0);
         gate.changed(&s, t0);
-        s.queue.push(SongInfo { path: "/q".into(), title: "q".into(), artist: String::new(), duration_ms: 1, key: None });
+        s.queue.push(SongInfo { path: "/q".into(), title: "q".into(), artist: String::new(), duration_ms: 1, key: None, by: None });
         assert!(gate.changed(&s, t0));
     }
 

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use meowtify_jam::follower::{Follower, Local, Step};
-use meowtify_jam::proto::{parse_audio_frame, Action, HostState, Perms, Signal, SongId, SongRef, ToGuest, ToHost};
+use meowtify_jam::proto::{parse_audio_frame, Action, HostState, Perms, SharedLyrics, Signal, SongId, SongRef, ToGuest, ToHost};
 use meowtify_jam::{ClientMsg, Member, ServerMsg, Target};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -62,6 +62,8 @@ pub enum GuestEvent {
     Do(Step),
     /// The host refused a request.
     Denied(String),
+    /// The words of a song, as the host found them.
+    Lyrics { song: SongId, lyrics: SharedLyrics },
     /// The relay connection dropped, with the reason. It is trying again.
     Reconnecting(String),
     /// The jam is over for the guest.
@@ -210,6 +212,8 @@ impl Actor {
                         Cmd::Request(action) => {
                             if let Some(link) = self.link.as_ref().filter(|_| self.open) {
                                 send_control(link, &ToHost::Request(action)).await;
+                            } else {
+                                self.emit(GuestEvent::Denied("you are not connected to the host yet, so nothing was sent".into()));
                             }
                         }
                         Cmd::Leave => {
@@ -335,6 +339,7 @@ impl Actor {
             }
             ToGuest::NoSong { song } => self.discard(song).await,
             ToGuest::Denied { what } => self.emit(GuestEvent::Denied(what)),
+            ToGuest::Lyrics { song, lyrics } => self.emit(GuestEvent::Lyrics { song, lyrics: lyrics.capped() }),
         }
     }
 
