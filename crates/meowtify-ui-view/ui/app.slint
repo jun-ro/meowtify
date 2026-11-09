@@ -321,6 +321,8 @@ component SourceItem inherits Rectangle {
     in property <bool> playlist: false;
     in property <image> cover;
     in property <bool> active;
+    /// Touch screen: a long press opens the context menu.
+    in property <bool> touch: false;
     callback clicked();
     /// Right button released; x and y are in window coordinates.
     callback context(length, length);
@@ -328,12 +330,36 @@ component SourceItem inherits Rectangle {
     border-radius: 8px;
     background: root.active ? Theme.accent-dim : (ta.has-hover ? Theme.raised : transparent);
     animate background { duration: 140ms; }
+    /// A long press opened the menu, so the release that follows is not a click.
+    property <bool> long-pressed: false;
+    lp := Timer {
+        interval: 450ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.long-pressed = true;
+            root.context(ta.absolute-position.x + ta.mouse-x, ta.absolute-position.y + ta.mouse-y);
+        }
+    }
     ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
-        clicked => { root.clicked(); }
+        clicked => {
+            if (root.long-pressed) {
+                root.long-pressed = false;
+            } else {
+                root.clicked();
+            }
+        }
         pointer-event(e) => {
             if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
                 root.context(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+            if (root.touch && e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                root.long-pressed = false;
+                lp.running = true;
+            }
+            if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                lp.running = false;
             }
         }
     }
@@ -566,15 +592,152 @@ component SkeletonRow inherits Rectangle {
     }
 }
 
+/// The round play and pause button. Fixed size, so the buttons beside it never move.
+component PlayButton inherits Rectangle {
+    in property <bool> playing;
+    callback clicked();
+    width: 44px;
+    height: 44px;
+    border-radius: 22px;
+    background: pp.pressed ? Theme.accent : (pp.has-hover ? Theme.accent-hot : Theme.accent);
+    opacity: pp.pressed ? 0.85 : 1;
+    animate background { duration: 180ms; easing: ease-out; }
+    animate opacity { duration: 120ms; }
+    pp := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.clicked(); } }
+    Path {
+        visible: !root.playing;
+        width: 14px;
+        height: 16px;
+        x: (parent.width - self.width) / 2 + 1px;
+        y: (parent.height - self.height) / 2;
+        commands: "M 0 0 L 14 8 L 0 16 Z";
+        fill: #1a1209;
+    }
+    Rectangle {
+        visible: root.playing;
+        width: 4px;
+        height: 16px;
+        x: parent.width / 2 - 6px;
+        y: (parent.height - self.height) / 2;
+        background: #1a1209;
+    }
+    Rectangle {
+        visible: root.playing;
+        width: 4px;
+        height: 16px;
+        x: parent.width / 2 + 2px;
+        y: (parent.height - self.height) / 2;
+        background: #1a1209;
+    }
+}
+
+/// One entry of the phone's bottom tab bar.
+component TabButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+    Label {
+        text: root.label;
+        color: root.active ? Theme.accent : Theme.muted;
+        font-size: 14px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+/// A playlist chip in the phone's row under the search bar.
+component SourceChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+    width: chip-label.preferred-width + 28px;
+    height: 32px;
+    border-radius: 16px;
+    background: root.active ? Theme.accent : Theme.raised;
+    chip-label := Label {
+        text: root.label;
+        color: root.active ? #1a1209 : Theme.text;
+        font-size: 14px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+/// A download in the phone's row under the search bar. The fill grows as the song downloads.
+component DownloadChip inherits Rectangle {
+    in property <string> label;
+    in property <float> progress;
+    in property <bool> active;
+    in property <bool> failed;
+    callback clicked();
+    width: 130px;
+    height: 32px;
+    border-radius: 16px;
+    clip: true;
+    background: Theme.raised;
+    Rectangle {
+        x: 0;
+        width: parent.width * (root.active ? root.progress : (root.failed ? 0 : 1));
+        background: Theme.accent-dim;
+        animate width { duration: 200ms; }
+    }
+    Label {
+        x: 14px;
+        width: parent.width - 28px;
+        text: root.label;
+        color: root.failed ? #e5484d : (root.active ? Theme.text : Theme.accent);
+        font-size: 14px;
+        font-weight: 700;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    TouchArea { clicked => { root.clicked(); } }
+}
+
 export component MainWindow inherits Window {
     title: "Meowtify";
     icon: @image-url("../../../assets/icon/meowtify-orange-512.png");
     preferred-width: 1120px;
     preferred-height: 720px;
-    min-width: 760px;
-    min-height: 420px;
+    min-width: 320px;
+    min-height: 300px;
     background: Theme.bg;
     default-font-size: 16px;
+
+    /// A phone held upright: the sidebar becomes a row of chips and a tab bar, the player bar shrinks.
+    /// Set from the width in `changed width`, not bound to it. A binding would loop: the width
+    /// comes from the layout, and the layout depends on this.
+    in-out property <bool> compact: false;
+    changed width => { self.compact = self.width < 700px; }
+    init => { self.compact = self.width < 700px; }
+    /// The device is driven by touch: no hover, so a long press stands in for a right click.
+    in property <bool> touch: false;
+
+    // The phone's player card: drag its song tab up to lift it and show the queue under it, drag it down to put it back.
+    /// Width of the song tab above the player panel.
+    property <length> tab-w: min(root.width - 24px, 340px);
+    /// The tab sits in the middle.
+    property <length> tab-x: (root.width - root.tab-w) / 2;
+    /// How far the player card can rise: from where it rests to just under the status bar.
+    property <length> sheet-max: root.height - root.bar-h - 16px - root.safe-area-insets.top - 8px;
+    /// Height of the tab bar at the bottom, with the room under it for the home indicator.
+    property <length> nav-h: root.bar-h - 148px;
+    /// Top of the player card. It rises with `sheet-t`, and the queue shows below it.
+    property <length> card-y: root.height - root.bar-h - 16px - root.sheet-t * root.sheet-max;
+    in-out property <bool> sheet-open: false;
+    property <bool> sheet-dragging: false;
+    /// The drag so far, as a share of `sheet-max`. Up is positive.
+    property <float> sheet-drag: 0;
+    /// 0 closed, 1 open. It follows the finger while dragging, then eases to one end.
+    property <float> sheet-t: root.sheet-dragging
+        ? Math.min(1, Math.max(0, (root.sheet-open ? 1.0 : 0.0) + root.sheet-drag))
+        : (root.sheet-open ? 1.0 : 0.0);
+    animate sheet-t { duration: root.sheet-dragging ? 0ms : 240ms; easing: ease-out; }
 
     in property <[Row]> rows;
     in property <string> now-title;
@@ -622,7 +785,7 @@ export component MainWindow inherits Window {
     /// Height of the queue panel, and how far it is scrolled sideways.
     out property <length> queue-panel-h: 82px;
     /// 0 while the queue panel is hidden, 1 when shown; it eases between the two.
-    property <bool> queue-has: root.up-next.length > 0 || root.autoplay-busy;
+    property <bool> queue-has: !root.compact && (root.up-next.length > 0 || root.autoplay-busy);
     /// False after the user folds the panel away; a small tab above the bar opens it again.
     property <bool> queue-open: true;
     property <float> queue-t: (root.queue-has && root.queue-open) ? 1 : 0;
@@ -631,7 +794,8 @@ export component MainWindow inherits Window {
     property <float> tab-t: (root.queue-has && !root.queue-open) ? 1 : 0;
     animate tab-t { duration: 300ms; easing: ease-out; }
     /// Height of the player bar.
-    out property <length> bar-h: 96px;
+    /// On a phone the bar holds the tab bar too, and sits above the home indicator.
+    out property <length> bar-h: (root.compact ? 204px : 96px) + root.safe-area-insets.bottom;
     in-out property <length> queue-scroll: 0px;
     /// Proxy address text, and the answer after the user applies it.
     in-out property <string> proxy: "";
@@ -710,6 +874,13 @@ export component MainWindow inherits Window {
     callback yt-search(string);
     /// The text changed: search after a short pause. Empty text cancels.
     callback query-edited(string);
+    /// Speech to text: true when the platform can listen, which shows the microphone button.
+    in property <bool> dictation: false;
+    in-out property <bool> dictating: false;
+    /// What the microphone has heard so far. The search box follows it.
+    in property <string> heard;
+    callback dictate();
+    callback dictate-stop();
     /// The text changed: fetch suggestions for it. Empty text clears them.
     callback suggest-request(string);
     callback play-result(int);
@@ -852,12 +1023,18 @@ export component MainWindow inherits Window {
         }
 
     VerticalLayout {
+        // Keep clear of the notch, the status bar and the rounded corners.
+        padding-top: root.safe-area-insets.top;
+        padding-left: root.safe-area-insets.left;
+        padding-right: root.safe-area-insets.right;
         HorizontalLayout {
             vertical-stretch: 1;
 
-            // Sidebar: playlists, then Settings at the bottom.
+            // Sidebar: playlists, then Settings at the bottom. A phone has no room for it.
             Rectangle {
-                width: 232px;
+                width: root.compact ? 0px : 232px;
+                visible: !root.compact;
+                clip: true;
                 background: Theme.panel;
                 VerticalLayout {
                     padding: 16px;
@@ -1020,6 +1197,8 @@ export component MainWindow inherits Window {
             // Main column, with the settings and downloads panes laid over it.
             Rectangle {
                 horizontal-stretch: 1;
+                // The panes inside ask for more width than a phone has. Take the width we are given.
+                min-width: 0px;
                 VerticalLayout {
 
                 // Search bar, centred.
@@ -1068,6 +1247,14 @@ export component MainWindow inherits Window {
                                 font-size: 16px;
                                 single-line: true;
                                 vertical-alignment: center;
+                                // Words from the microphone go into the box like typing would.
+                                property <string> incoming: root.heard;
+                                changed incoming => {
+                                    if (self.incoming != "") {
+                                        self.text = self.incoming;
+                                        root.query-edited(self.text);
+                                    }
+                                }
                                 accepted => {
                                     if (root.suggest-index >= 0 && root.suggest-index < root.suggestions.length) {
                                         self.text = root.suggestions[root.suggest-index];
@@ -1107,7 +1294,7 @@ export component MainWindow inherits Window {
                             visible: input.text == "";
                         }
                         Label {
-                            x: parent.width - 96px - 14px;
+                            x: parent.width - 96px - 14px - (root.dictation ? 32px : 0px);
                             width: 96px;
                             text: root.yt-busy ? "Searching…" : (root.loading ? "Loading…" : "");
                             color: Theme.muted;
@@ -1115,6 +1302,41 @@ export component MainWindow inherits Window {
                             vertical-alignment: center;
                             horizontal-alignment: right;
                             visible: input.text == "" || root.yt-busy || root.loading;
+                        }
+                        // Microphone button: speak the search. Tap again to stop.
+                        Rectangle {
+                            visible: root.dictation;
+                            x: parent.width - 32px - (input.text != "" && !root.yt-busy && !root.loading ? 32px : 0px);
+                            y: 8px;
+                            width: 24px;
+                            height: 24px;
+                            border-radius: 12px;
+                            background: root.dictating ? Theme.accent : (mic.has-hover ? Theme.hover : transparent);
+                            animate background { duration: 120ms; }
+                            mic := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    if (root.dictating) {
+                                        root.dictating = false;
+                                        root.dictate-stop();
+                                    } else {
+                                        root.dictate();
+                                    }
+                                }
+                            }
+                            Path {
+                                x: 4px;
+                                y: 3px;
+                                width: 16px;
+                                height: 18px;
+                                viewbox-width: 16;
+                                viewbox-height: 18;
+                                commands: "M 5.5 3.5 C 5.5 -0.5 10.5 -0.5 10.5 3.5 L 10.5 8 C 10.5 12 5.5 12 5.5 8 Z M 2.5 8 C 2.5 15 13.5 15 13.5 8 M 8 14 L 8 17";
+                                stroke: root.dictating ? Theme.bg : Theme.muted;
+                                stroke-width: 1.6px;
+                                stroke-line-cap: round;
+                                stroke-line-join: round;
+                            }
                         }
                         // Clear button.
                         Rectangle {
@@ -1171,6 +1393,72 @@ export component MainWindow inherits Window {
                     }
                 }
 
+                // Phone: All Songs on the left, a bar, and the download queue where the playlists were.
+                // The playlists have their own tab.
+                // Always built, 0 high when hidden, so the flying chip can find the queue.
+                Rectangle {
+                    visible: root.compact && root.view == 0;
+                    height: (root.compact && root.view == 0) ? 44px : 0px;
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
+                        spacing: 10px;
+                        SourceChip {
+                            label: "All Songs";
+                            active: !root.show-results && root.current-source == 0;
+                            clicked => {
+                                root.show-results = false;
+                                root.current-source = 0;
+                                root.source-selected(0);
+                            }
+                        }
+                        // The playlist that is open.
+                        if root.current-source > 0: SourceChip {
+                            label: root.sources[root.current-source];
+                            active: !root.show-results;
+                            clicked => { root.view = 2; }
+                        }
+                        Rectangle {
+                            width: 2px;
+                            border-radius: 1px;
+                            background: #3a3a42;
+                        }
+                        // Downloads, newest first. A tap opens the whole list.
+                        dq-anchor := Flickable {
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                            preferred-width: 0px;
+                            content-width: dq.preferred-width;
+                            dq := HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                if root.queue.length == 0: Rectangle {
+                                    width: 130px;
+                                    Label {
+                                        text: "Download Queue...";
+                                        color: root.fly-on ? Theme.accent : Theme.muted;
+                                        animate color { duration: 260ms; }
+                                        font-size: 14px;
+                                        vertical-alignment: center;
+                                    }
+                                    TouchArea { clicked => { root.view = 3; } }
+                                }
+                                for j[idx] in root.queue: DownloadChip {
+                                    visible: idx < 4 && !j.leaving;
+                                    width: (idx < 4 && !j.leaving) ? 130px : 0px;
+                                    label: j.title;
+                                    progress: j.progress;
+                                    active: j.active;
+                                    failed: j.failed;
+                                    clicked => { root.view = 3; }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Status line: search errors, "Nothing found".
                 if root.yt-status != "": Label {
                     height: 22px;
@@ -1190,7 +1478,7 @@ export component MainWindow inherits Window {
                         spacing: 12px;
                         Rectangle { width: 44px; }
                         Label { text: "TITLE"; color: Theme.muted; font-size: 16px; font-weight: 700; horizontal-stretch: 2; preferred-width: 0px; horizontal-alignment: left; vertical-alignment: center; }
-                        Label { text: "ALBUM"; color: Theme.muted; font-size: 16px; font-weight: 700; horizontal-stretch: 1; preferred-width: 0px; horizontal-alignment: left; vertical-alignment: center; }
+                        if !root.compact: Label { text: "ALBUM"; color: Theme.muted; font-size: 16px; font-weight: 700; horizontal-stretch: 1; preferred-width: 0px; horizontal-alignment: left; vertical-alignment: center; }
                         Label { text: "TIME"; color: Theme.muted; font-size: 16px; font-weight: 700; width: 56px; horizontal-alignment: right; vertical-alignment: center; }
                     }
                     Rectangle {
@@ -1208,16 +1496,41 @@ export component MainWindow inherits Window {
                         visible: !root.show-results;
                         width: 100%;
                         height: 100%;
-                        for r[idx] in rows: Rectangle {
+                        for r[idx] in rows: row := Rectangle {
                             height: 56px;
                             background: ta.pressed ? Theme.raised : (ta.has-hover ? Theme.hover : transparent);
                             animate background { duration: 100ms; }
+                            /// A long press opened the menu, so the release that follows is not a click.
+                            property <bool> long-pressed: false;
+                            lp := Timer {
+                                interval: 450ms;
+                                running: false;
+                                triggered => {
+                                    self.running = false;
+                                    row.long-pressed = true;
+                                    root.open-menu(0, idx, true, ta.absolute-position.x + ta.mouse-x, ta.absolute-position.y + ta.mouse-y);
+                                }
+                            }
                             ta := TouchArea {
                                 mouse-cursor: MouseCursor.pointer;
-                                clicked => { fs.focus(); if (r.key == root.now-uri) { root.play-pause(); } else { root.row-clicked(idx); } }
+                                clicked => {
+                                    if (row.long-pressed) {
+                                        row.long-pressed = false;
+                                    } else {
+                                        fs.focus();
+                                        if (r.key == root.now-uri) { root.play-pause(); } else { root.row-clicked(idx); }
+                                    }
+                                }
                                 pointer-event(e) => {
                                     if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
                                         root.open-menu(0, idx, true, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                    }
+                                    if (root.touch && e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                                        row.long-pressed = false;
+                                        lp.running = true;
+                                    }
+                                    if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                                        lp.running = false;
                                     }
                                 }
                             }
@@ -1236,7 +1549,7 @@ export component MainWindow inherits Window {
                                     Label { text: r.title; color: r.key == root.now-uri ? Theme.accent : Theme.text; font-size: 16px; font-weight: 600; overflow: elide; }
                                     Label { text: r.artist; color: Theme.muted; font-size: 16px; overflow: elide; }
                                 }
-                                Label {
+                                if !root.compact: Label {
                                     text: r.album;
                                     color: Theme.muted;
                                     font-size: 16px;
@@ -1276,8 +1589,18 @@ export component MainWindow inherits Window {
                         changed content-y => { if (self.content-height + self.content-y < self.visible-height + 280px) { root.load-more(); } }
                         changed content-height => { if (self.content-height + self.content-y < self.visible-height + 280px) { root.load-more(); } }
                         changed visible-height => { if (self.content-height + self.content-y < self.visible-height + 280px) { root.load-more(); } }
-                        for r[idx] in root.results: Rectangle {
+                        for r[idx] in root.results: rrow := Rectangle {
                             property <bool> shown: false;
+                            property <bool> long-pressed: false;
+                            rlp := Timer {
+                                interval: 450ms;
+                                running: false;
+                                triggered => {
+                                    self.running = false;
+                                    rrow.long-pressed = true;
+                                    root.open-menu(1, idx, r.state == "In library", rta.absolute-position.x + rta.mouse-x, rta.absolute-position.y + rta.mouse-y);
+                                }
+                            }
                             init => { self.shown = true; }
                             opacity: self.shown ? 1 : 0;
                             animate opacity { duration: 220ms; delay: min(idx, 10) * 24ms; easing: ease-out; }
@@ -1288,17 +1611,28 @@ export component MainWindow inherits Window {
                                 mouse-cursor: MouseCursor.pointer;
                                 changed has-hover => { if (self.has-hover && r.state == "") { root.result-hovered(idx); } }
                                 clicked => {
-                                    fs.focus();
-                                    if (r.key == root.now-vid) {
-                                        root.play-pause();
+                                    if (rrow.long-pressed) {
+                                        rrow.long-pressed = false;
                                     } else {
-                                        if (r.state == "") { root.fly-from(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y); }
-                                        root.play-result(idx);
+                                        fs.focus();
+                                        if (r.key == root.now-vid) {
+                                            root.play-pause();
+                                        } else {
+                                            if (r.state == "") { root.fly-from(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y); }
+                                            root.play-result(idx);
+                                        }
                                     }
                                 }
                                 pointer-event(e) => {
                                     if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
                                         root.open-menu(1, idx, r.state == "In library", self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                    }
+                                    if (root.touch && e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                                        rrow.long-pressed = false;
+                                        rlp.running = true;
+                                    }
+                                    if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                                        rlp.running = false;
                                     }
                                 }
                             }
@@ -1321,7 +1655,7 @@ export component MainWindow inherits Window {
                                     width: 84px;
                                     // Shown while hovering a song that is not saved yet.
                                     property <bool> can: r.state == "";
-                                    opacity: can && (rta.has-hover || inst-ta.has-hover) ? 1 : 0;
+                                    opacity: can && (root.touch || rta.has-hover || inst-ta.has-hover) ? 1 : 0;
                                     animate opacity { duration: 120ms; }
                                     Rectangle {
                                         height: 30px;
@@ -1431,8 +1765,10 @@ export component MainWindow inherits Window {
                     TouchArea { }
                     // Scrolls, so a short window never pushes the player bar out of view.
                     Flickable {
+                    // Scroll up and down only. Without this the page is as wide as its widest line.
+                    content-width: self.width;
                     VerticalLayout {
-                        padding: 32px;
+                        padding: root.compact ? 16px : 32px;
                         spacing: 8px;
                         alignment: start;
                         Label { text: "Settings"; color: Theme.text; font-size: 24px; font-weight: 800; height: 44px; }
@@ -1455,7 +1791,7 @@ export component MainWindow inherits Window {
                             height: 8px;
                         }
                         HorizontalLayout {
-                            height: 40px;
+                            height: root.compact ? 48px : 40px;
                             alignment: start;
                             spacing: 12px;
                             Rectangle {
@@ -1477,6 +1813,7 @@ export component MainWindow inherits Window {
                                 color: Theme.muted;
                                 font-size: 16px;
                                 vertical-alignment: center;
+                                wrap: word-wrap;
                             }
                         }
                         Label {
@@ -1558,7 +1895,7 @@ export component MainWindow inherits Window {
                         }
                         Label { text: "CACHE"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
                         HorizontalLayout {
-                            height: 40px;
+                            height: root.compact ? 48px : 40px;
                             alignment: start;
                             spacing: 12px;
                             Rectangle {
@@ -1580,6 +1917,7 @@ export component MainWindow inherits Window {
                                 color: Theme.muted;
                                 font-size: 16px;
                                 vertical-alignment: center;
+                                wrap: word-wrap;
                             }
                         }
                         Label {
@@ -1761,6 +2099,47 @@ export component MainWindow inherits Window {
                 }
 
 
+                // Playlists pane. On a phone the sidebar's list lives here.
+                Rectangle {
+                    opacity: root.view == 2 ? 1 : 0;
+                    animate opacity { duration: 160ms; easing: ease-out; }
+                    visible: root.view == 2 || self.opacity > 0.01;
+                    width: 100%;
+                    height: 100%;
+                    background: Theme.bg;
+                    TouchArea { }
+                    Flickable {
+                        content-width: self.width;
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 4px;
+                            alignment: start;
+                            Label { text: "Playlists"; color: Theme.text; font-size: 24px; font-weight: 800; height: 44px; }
+                            for name[i] in root.sources: SourceItem {
+                                label: name;
+                                playlist: i > 0;
+                                cover: root.source-art[i];
+                                has-icon: i == 0;
+                                bare-icon: i == 0;
+                                icon: @image-url("../../../assets/icon/songs-pixel.png");
+                                touch: root.touch;
+                                active: i == root.current-source;
+                                context(x, y) => { if (i > 0) { root.open-menu(2, i - 1, true, x, y); } }
+                                clicked => {
+                                    root.view = 0;
+                                    root.show-results = false;
+                                    root.current-source = i;
+                                    root.source-selected(i);
+                                }
+                            }
+                            SourceItem {
+                                label: "+ New playlist";
+                                clicked => { root.ctx(2, -1, "new", -1); }
+                            }
+                        }
+                    }
+                }
+
                 // Jam pane.
                 Rectangle {
                     opacity: root.view == 4 ? 1 : 0;
@@ -1770,8 +2149,11 @@ export component MainWindow inherits Window {
                     height: 100%;
                     background: Theme.bg;
                     TouchArea { }
+                    Flickable {
+                    // Scroll up and down only.
+                    content-width: self.width;
                     VerticalLayout {
-                        padding: 32px;
+                        padding: root.compact ? 16px : 32px;
                         spacing: 8px;
                         alignment: start;
                         Label { text: "Jam"; color: Theme.text; font-size: 24px; font-weight: 800; height: 44px; }
@@ -1808,24 +2190,30 @@ export component MainWindow inherits Window {
                             }
                         }
                         Label { text: "CAT COLOUR"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
-                        HorizontalLayout {
+                        // The swatches scroll sideways when the screen is too narrow for all of them.
+                        Flickable {
                             height: 34px;
-                            spacing: 8px;
-                            alignment: start;
-                            Pill { text: "Auto"; primary: root.jam-hue < 0; clicked => { root.jam-set-hue(-1); } }
-                            for sw in root.jam-palette: Rectangle {
-                                width: 34px;
-                                height: 34px;
-                                border-radius: 17px;
-                                background: sw.color;
-                                border-width: root.jam-hue == sw.hue ? 3px : (sa.has-hover ? 2px : 0px);
-                                border-color: Theme.text;
-                                sa := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.jam-set-hue(sw.hue); } }
+                            min-width: 0px;
+                            preferred-width: 0px;
+                            content-width: hue-row.preferred-width;
+                            hue-row := HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                Pill { text: "Auto"; primary: root.jam-hue < 0; clicked => { root.jam-set-hue(-1); } }
+                                for sw in root.jam-palette: Rectangle {
+                                    width: 34px;
+                                    height: 34px;
+                                    border-radius: 17px;
+                                    background: sw.color;
+                                    border-width: root.jam-hue == sw.hue ? 3px : (sa.has-hover ? 2px : 0px);
+                                    border-color: Theme.text;
+                                    sa := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.jam-set-hue(sw.hue); } }
+                                }
                             }
                         }
                         Label { text: "PRIVACY"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
                         HorizontalLayout {
-                            height: 34px;
+                            height: root.compact ? 64px : 34px;
                             spacing: 12px;
                             alignment: start;
                             PermChip { label: root.jam-share-ip ? "Share" : "Hidden"; on: !root.jam-share-ip; toggled(on) => { root.jam-set-share-ip(!on); } }
@@ -1834,7 +2222,7 @@ export component MainWindow inherits Window {
                                 color: Theme.muted;
                                 font-size: 16px;
                                 vertical-alignment: center;
-                                overflow: elide;
+                                wrap: word-wrap;
                             }
                         }
                         if root.jam-invite != "": Rectangle {
@@ -1876,7 +2264,7 @@ export component MainWindow inherits Window {
                             Label { text: "JOIN A JAM"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
                             JamField {
                                 text <=> root.jam-join-text;
-                                hint: "Paste a meowtify://jam/… link and press Enter";
+                                hint: root.compact ? "Paste a jam link, press Enter" : "Paste a meowtify://jam/… link and press Enter";
                                 accepted(t) => { root.jam-join(t); }
                             }
                         }
@@ -1945,6 +2333,7 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
+                    }
                 }
 
                 // Downloads pane.
@@ -1960,12 +2349,13 @@ export component MainWindow inherits Window {
                         Rectangle {
                             height: 64px;
                             HorizontalLayout {
-                                padding-left: 24px;
-                                padding-right: 24px;
+                                padding-left: root.compact ? 16px : 24px;
+                                padding-right: root.compact ? 16px : 24px;
                                 padding-top: 16px;
                                 padding-bottom: 16px;
                                 spacing: 12px;
-                                Pill { text: "Back"; primary: false; clicked => { root.view = 0; } }
+                                // The tab bar already leads back to the library.
+                                if !root.compact: Pill { text: "Back"; primary: false; clicked => { root.view = 0; } }
                                 Label { text: "Downloads"; color: Theme.text; font-size: 24px; font-weight: 800; vertical-alignment: center; horizontal-stretch: 1; }
                                 Pill { text: "Clear finished"; primary: false; clicked => { root.clear-finished(); } }
                             }
@@ -2015,14 +2405,16 @@ export component MainWindow inherits Window {
         // Now-playing bar.
         Rectangle {
             height: root.bar-h;
-            background: Theme.panel;
-            Rectangle { y: 0; height: 1px; background: Theme.raised; }
+            // On a phone the song card floats above the player panel, over the page colour.
+            background: root.compact ? Theme.bg : Theme.panel;
+            Rectangle { y: 0; height: 1px; background: Theme.raised; visible: !root.compact; }
             bar := Rectangle {
                 property <length> mid: max(260px, min(560px, self.width - 520px));
                 property <length> side: (self.width - self.mid) / 2;
 
                 // Left: cover and names.
                 HorizontalLayout {
+                    visible: !root.compact;
                     x: 20px;
                     y: 10px;
                     width: bar.side - 36px;
@@ -2102,6 +2494,7 @@ export component MainWindow inherits Window {
 
                 // Centre: transport and seek bar.
                 VerticalLayout {
+                    visible: !root.compact;
                     x: bar.side;
                     y: 12px;
                     width: bar.mid;
@@ -2114,42 +2507,7 @@ export component MainWindow inherits Window {
                         height: 44px;
                         ToggleIcon { kind: "shuffle"; active: root.shuffle; clicked => { root.toggle-shuffle(); } }
                         IconButton { kind: "prev"; clicked => { root.previous(); } }
-                        Rectangle {
-                            // Fixed size, so the buttons beside it never move. Only the colour changes.
-                            width: 44px;
-                            height: 44px;
-                            border-radius: 22px;
-                            background: pp.pressed ? Theme.accent : (pp.has-hover ? Theme.accent-hot : Theme.accent);
-                            opacity: pp.pressed ? 0.85 : 1;
-                            animate background { duration: 180ms; easing: ease-out; }
-                            animate opacity { duration: 120ms; }
-                            pp := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.play-pause(); } }
-                            Path {
-                                visible: !root.playing;
-                                width: 14px;
-                                height: 16px;
-                                x: (parent.width - self.width) / 2 + 1px;
-                                y: (parent.height - self.height) / 2;
-                                commands: "M 0 0 L 14 8 L 0 16 Z";
-                                fill: #1a1209;
-                            }
-                            Rectangle {
-                                visible: root.playing;
-                                width: 4px;
-                                height: 16px;
-                                x: parent.width / 2 - 6px;
-                                y: (parent.height - self.height) / 2;
-                                background: #1a1209;
-                            }
-                            Rectangle {
-                                visible: root.playing;
-                                width: 4px;
-                                height: 16px;
-                                x: parent.width / 2 + 2px;
-                                y: (parent.height - self.height) / 2;
-                                background: #1a1209;
-                            }
-                        }
+                        PlayButton { playing: root.playing; clicked => { root.play-pause(); } }
                         IconButton { kind: "next"; clicked => { root.next(); } }
                         ToggleIcon {
                             kind: "repeat";
@@ -2174,6 +2532,7 @@ export component MainWindow inherits Window {
 
                 // Right: volume.
                 VerticalLayout {
+                    visible: !root.compact;
                     x: bar.width - bar.side + 16px;
                     y: 10px;
                     width: bar.side - 36px;
@@ -2237,9 +2596,295 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
+
+                // Phone layout: the tab bar stays at the bottom. The player card above it, and the
+                // queue that opens under the card, are drawn further down.
+                if root.compact: Rectangle {
+                    width: parent.width;
+                    height: root.bar-h;
+                    Rectangle {
+                        y: 148px;
+                        height: parent.height - 148px;
+                        background: Theme.panel;
+                        Rectangle { y: 0; height: 1px; background: Theme.raised; }
+                        HorizontalLayout {
+                            height: 56px;
+                            TabButton { label: "Library"; active: root.view == 0; clicked => { root.view = 0; } }
+                            TabButton { label: "Playlists"; active: root.view == 2; clicked => { root.view = 2; } }
+                            TabButton { label: "Jam"; active: root.view == 4; clicked => { root.view = 4; } }
+                            TabButton { label: "Settings"; active: root.view == 1; clicked => { root.view = 1; } }
+                        }
+                    }
+                }
             }
         }
     }
+    }
+
+    // Phone: a dim layer over the page while the card is lifted. A tap on it puts the card back.
+    if root.compact && root.sheet-t > 0.001: Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height - root.nav-h;
+        background: #000000;
+        opacity: 0.5 * root.sheet-t;
+        TouchArea { clicked => { root.sheet-open = false; } }
+    }
+
+    // Phone: the queue. It fills the room the card leaves as it rises, down to the tab bar.
+    if root.compact && root.sheet-t > 0.001: Rectangle {
+        x: 0;
+        width: root.width;
+        y: root.card-y + 164px;
+        height: root.height - root.nav-h - self.y;
+        background: Theme.panel;
+        clip: true;
+        VerticalLayout {
+            padding-left: 16px;
+            padding-right: 16px;
+            spacing: 4px;
+            // Dragging the header down puts the card back.
+            Rectangle {
+                height: 44px;
+                Label {
+                    text: "Up next";
+                    color: Theme.text;
+                    font-size: 20px;
+                    font-weight: 800;
+                    vertical-alignment: center;
+                }
+                head-ta := TouchArea {
+                    property <length> start-y;
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down) {
+                            self.start-y = self.absolute-position.y + self.mouse-y;
+                            root.sheet-dragging = true;
+                        } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                            root.sheet-dragging = false;
+                            root.sheet-open = (1.0 + root.sheet-drag) > 0.65;
+                            root.sheet-drag = 0;
+                        }
+                    }
+                    moved => { root.sheet-drag = (self.start-y - (self.absolute-position.y + self.mouse-y)) / root.sheet-max; }
+                }
+            }
+            if root.up-next.length == 0: Label {
+                text: root.autoplay-busy ? "Finding songs\u{2026}" : "Nothing queued";
+                color: Theme.muted;
+                font-size: 16px;
+                height: 40px;
+                vertical-alignment: center;
+            }
+            ListView {
+                vertical-stretch: 1;
+                for item[idx] in root.up-next: qitem := Rectangle {
+                    height: 56px;
+                    background: qrow.pressed ? Theme.raised : transparent;
+                    border-radius: 8px;
+                    /// A long press opened the menu, so the release that follows is not a tap.
+                    property <bool> long-pressed: false;
+                    qlp := Timer {
+                        interval: 450ms;
+                        running: false;
+                        triggered => {
+                            self.running = false;
+                            qitem.long-pressed = true;
+                            root.open-menu(3, idx, true, qrow.absolute-position.x + qrow.mouse-x, qrow.absolute-position.y + qrow.mouse-y);
+                        }
+                    }
+                    Rectangle {
+                        x: 0;
+                        y: 10px;
+                        height: parent.height - 20px;
+                        width: 4px;
+                        border-radius: 2px;
+                        background: item.has-mark ? item.mark : (item.kind == 0 ? Theme.accent : transparent);
+                    }
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
+                        spacing: 12px;
+                        Rectangle {
+                            width: 44px;
+                            border-radius: 6px;
+                            clip: true;
+                            Image { source: item.art; width: 100%; height: 100%; image-fit: cover; }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            Label { text: item.title; color: item.kind == 2 ? Theme.muted : Theme.text; font-size: 16px; font-weight: 600; overflow: elide; }
+                            Label { text: item.artist; color: Theme.muted; font-size: 14px; overflow: elide; }
+                        }
+                    }
+                    qrow := TouchArea {
+                        clicked => {
+                            if (qitem.long-pressed) {
+                                qitem.long-pressed = false;
+                            } else {
+                                root.jump-to(idx);
+                                root.sheet-open = false;
+                            }
+                        }
+                        pointer-event(e) => {
+                            if (root.touch && e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                                qitem.long-pressed = false;
+                                qlp.running = true;
+                            }
+                            if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                                qlp.running = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Phone: the player card. A tab with curved, sloping sides rises from the middle of the
+    // panel, and the panel holds the controls and the seek bar. All of it moves together. Tap the
+    // tab for the lyrics, or drag it up to lift the card and show the queue.
+    if root.compact: Rectangle {
+        x: 0;
+        y: root.card-y;
+        width: root.width;
+        height: 164px;
+        // The panel with the controls and the seek bar.
+        Rectangle {
+            y: 80px;
+            height: 84px;
+            background: Theme.panel;
+            // The tab covers the middle of this line.
+            Rectangle { x: 0; y: 0; width: root.tab-x; height: 1px; background: Theme.raised; }
+            Rectangle { x: root.tab-x + root.tab-w; y: 0; width: parent.width - self.x; height: 1px; background: Theme.raised; }
+            HorizontalLayout {
+                y: 8px;
+                width: parent.width;
+                height: 44px;
+                alignment: center;
+                spacing: 18px;
+                ToggleIcon { kind: "shuffle"; active: root.shuffle; clicked => { root.toggle-shuffle(); } }
+                IconButton { kind: "prev"; clicked => { root.previous(); } }
+                PlayButton { playing: root.playing; clicked => { root.play-pause(); } }
+                IconButton { kind: "next"; clicked => { root.next(); } }
+                ToggleIcon {
+                    kind: "repeat";
+                    active: root.repeat-mode != 0;
+                    badge: root.repeat-mode == 2 ? "1" : "";
+                    clicked => { root.cycle-repeat(); }
+                }
+            }
+            HorizontalLayout {
+                x: 12px;
+                y: 56px;
+                width: parent.width - 24px;
+                height: 24px;
+                spacing: 8px;
+                Label { text: root.elapsed; color: Theme.muted; font-size: 14px; width: 40px; horizontal-alignment: right; vertical-alignment: center; }
+                SeekBar {
+                    value: root.progress;
+                    horizontal-stretch: 1;
+                    seek(f) => { root.seek(f); }
+                }
+                Label { text: root.total; color: Theme.muted; font-size: 14px; width: 40px; horizontal-alignment: left; vertical-alignment: center; }
+            }
+        }
+        // The tab.
+        Rectangle {
+            x: root.tab-x;
+            y: 0;
+            width: root.tab-w;
+            height: 81px;
+            Path {
+                width: parent.width;
+                height: parent.height;
+                viewbox-width: root.tab-w / 1px;
+                viewbox-height: 81;
+                // An S-curve up from the panel's edge, the flat top, and the same curve back down.
+                commands: "M 0 81 C 20 81 24 2 44 2 L \{root.tab-w / 1px - 44} 2 C \{root.tab-w / 1px - 24} 2 \{root.tab-w / 1px - 20} 81 \{root.tab-w / 1px} 81";
+                fill: Theme.panel;
+                stroke: Theme.raised;
+                stroke-width: 1px;
+            }
+            // The chevron says the tab can be dragged: up to open the queue, down to close it.
+            Path {
+                x: (parent.width - 22px) / 2;
+                y: 8px;
+                width: 22px;
+                height: 10px;
+                viewbox-width: 22;
+                viewbox-height: 10;
+                commands: root.sheet-open ? "M 1 1 L 11 9 L 21 1" : "M 1 9 L 11 1 L 21 9";
+                stroke: Theme.muted;
+                stroke-width: 2.5px;
+                stroke-line-cap: round;
+                stroke-line-join: round;
+            }
+            Rectangle {
+                x: 0;
+                y: 24px;
+                width: parent.width;
+                height: 57px;
+                HorizontalLayout {
+                    padding-left: 40px;
+                    padding-right: 40px;
+                    padding-top: 8px;
+                    padding-bottom: 8px;
+                    spacing: 10px;
+                    Cover {
+                        side: 40px;
+                        source: root.now-art;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        spacing: 1px;
+                        Label {
+                            text: root.now-title != "" ? root.now-title : "Nothing playing";
+                            color: Theme.text;
+                            font-size: 16px;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+                        Label {
+                            text: root.status != "" ? root.status : root.now-artist;
+                            color: root.status != "" ? Theme.accent : Theme.muted;
+                            font-size: 14px;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+            song-tab-ta := TouchArea {
+                property <bool> far: false;
+                property <length> start-y;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) {
+                        self.far = false;
+                        self.start-y = self.absolute-position.y + self.mouse-y;
+                        root.sheet-dragging = true;
+                    } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                        root.sheet-dragging = false;
+                        if (self.far) {
+                            root.sheet-open = ((root.sheet-open ? 1.0 : 0.0) + root.sheet-drag) > 0.35;
+                        } else if (root.sheet-open) {
+                            root.sheet-open = false;
+                        } else {
+                            root.toggle-lyrics();
+                        }
+                        root.sheet-drag = 0;
+                    }
+                }
+                // The tab moves with the finger, so the pointer is measured on the window, not on the tab.
+                moved => {
+                    root.sheet-drag = (self.start-y - (self.absolute-position.y + self.mouse-y)) / root.sheet-max;
+                    if (Math.abs(self.start-y - (self.absolute-position.y + self.mouse-y)) > 8px) { self.far = true; }
+                }
+            }
+        }
     }
 
     // Right-click menu.
@@ -2280,8 +2925,8 @@ export component MainWindow inherits Window {
                 }
                 if root.menu-kind != 2 && root.menu-installed && root.sources.length > 9: MenuItem { label: "Find a playlist\u{2026}"; clicked => { root.picker-open = true; root.picker-filter(""); } }
                 if root.menu-kind != 2 && root.menu-installed: MenuItem { label: "New playlist\u{2026}"; clicked => { root.ctx(root.menu-kind, root.menu-idx, "new", -1); } }
-                if root.menu-kind != 2 && root.menu-installed: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.raised; } }
-                if root.menu-kind != 2 && root.menu-installed: MenuItem { label: "Delete song\u{2026}"; danger: true; clicked => { root.ctx(root.menu-kind, root.menu-idx, "delete", 0); } }
+                if root.menu-kind < 2 && root.menu-installed: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.raised; } }
+                if root.menu-kind < 2 && root.menu-installed: MenuItem { label: "Delete song\u{2026}"; danger: true; clicked => { root.ctx(root.menu-kind, root.menu-idx, "delete", 0); } }
                 if root.menu-kind == 0 && root.viewing-playlist: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.raised; } }
                 if root.menu-kind == 0 && root.viewing-playlist: MenuItem { label: "Remove from playlist"; danger: true; clicked => { root.ctx(0, root.menu-idx, "remove", 0); } }
             }
@@ -2578,8 +3223,8 @@ export component MainWindow inherits Window {
         background: Theme.accent;
         states [
             flying when root.fly-on: {
-                x: queue-label.absolute-position.x + 8px;
-                y: queue-label.absolute-position.y + 8px;
+                x: (root.compact ? dq-anchor.absolute-position.x : queue-label.absolute-position.x) + 8px;
+                y: (root.compact ? dq-anchor.absolute-position.y : queue-label.absolute-position.y) + 8px;
                 width: 12px;
                 height: 12px;
                 opacity: 0;

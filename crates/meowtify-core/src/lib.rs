@@ -15,7 +15,7 @@ mod types;
 
 pub use actor::{run, AppHandle};
 pub use error::{Error, Result};
-pub use ids::{download_id, youtube_id, youtube_thumbnail};
+pub use ids::{cover_id, download_id, set_cover_id, youtube_id, youtube_thumbnail};
 pub use message::{Command, Event, Place, Selection};
 pub use traits::{MetadataSource, PlaybackEngine};
 pub use types::{Album, Artist, Page, PlaybackState, Playlist, Queue, Repeat, Track};

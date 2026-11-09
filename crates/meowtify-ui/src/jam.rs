@@ -39,18 +39,10 @@ const NAME_CHARS: usize = 24;
 
 thread_local! {
     static JAM: RefCell<Option<Rc<Jam>>> = const { RefCell::new(None) };
-    /// The file a guest plays now and the video id of its cover. The cache file has no id in its
-    /// name, so the id the host sent is kept here.
-    static COVER: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
 }
 
 fn current() -> Option<Rc<Jam>> {
     JAM.with(|j| j.borrow().clone())
-}
-
-/// The video id of the cover for a file a guest plays, if the host sent one.
-pub(crate) fn cover_key(uri: &str) -> Option<String> {
-    COVER.with(|c| c.borrow().as_ref().filter(|(path, _)| path == uri).map(|(_, key)| key.clone()))
 }
 
 /// Whether this window is a guest in a jam right now.
@@ -89,7 +81,7 @@ pub(crate) fn queue_mark(uri: &str, queued_by_people: bool) -> Option<slint::Col
 /// player lets the background tasks end, so the process can exit.
 pub(crate) fn clear() {
     JAM.with(|j| *j.borrow_mut() = None);
-    COVER.with(|c| *c.borrow_mut() = None);
+    meowtify_core::set_cover_id("", None);
 }
 
 /// Sets the Jam page up. `links` carries `meowtify://jam/…` links that were opened from outside
@@ -166,7 +158,19 @@ pub(crate) fn install(
     if let Some(mut links) = links {
         rt.spawn(async move {
             while let Some(link) = links.recv().await {
-                if slint::invoke_from_event_loop(move || with(|j| j.invite(&link))).is_err() {
+                // A `meowtify://play?q=…` link (a Siri Shortcut) asks for a song; the rest are jam invites.
+                let sent = if let Some(text) = crate::get::play_link_query(&link) {
+                    slint::invoke_from_event_loop(move || {
+                        crate::get::GET.with(|g| {
+                            if let Some(g) = g.borrow().clone() {
+                                g.play_query(&text);
+                            }
+                        });
+                    })
+                } else {
+                    slint::invoke_from_event_loop(move || with(|j| j.invite(&link)))
+                };
+                if sent.is_err() {
                     break;
                 }
             }
@@ -482,7 +486,7 @@ impl Jam {
                 }
             });
         }
-        COVER.with(|c| *c.borrow_mut() = None);
+        meowtify_core::set_cover_id("", None);
         *self.shown_queue.borrow_mut() = None;
         *self.shared_for.borrow_mut() = None;
         if let Some(w) = self.win.upgrade() {
@@ -814,10 +818,9 @@ impl Jam {
                 if let Some(library) = &self.library {
                     library.add_transient(Path::new(&path), title, artist, duration);
                 }
-                // The file has no id in its name; the cover comes from the one the host sent.
-                COVER.with(|c| {
-                    *c.borrow_mut() = info.as_ref().and_then(|s| s.key.clone()).map(|key| (path.clone(), key));
-                });
+                // The file has no id in its name; the cover comes from the one the host sent. The
+                // player's window and Discord presence both look it up.
+                meowtify_core::set_cover_id(&path, info.as_ref().and_then(|s| s.key.as_deref()));
                 if let Some(w) = self.win.upgrade() {
                     crate::lyrics::offer(&w, shared.map(|l| (path.as_str(), from_shared(l))));
                 }

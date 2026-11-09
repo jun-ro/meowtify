@@ -5,16 +5,16 @@ members = ["crates/*"]
 # including the plugin compiler.
 default-members = ["crates/meowtify"]
 
-# One feature set for slint, shared by the view and controller crates.
-# Keeps feature unification stable so slint is built once.
+# The shared part of the slint feature set. The window backend and renderer depend on the
+# platform, so meowtify-ui adds them per target.
 [workspace.dependencies]
 # The jam wire format lives in the relay repository, so client and server cannot drift apart.
 meowtify-jam = { git = "https://github.com/jun-ro/meowtify-relay", tag = "v0.1.2" }
 meowtify-jam-relay = { git = "https://github.com/jun-ro/meowtify-relay", tag = "v0.1.2" }
-slint = { version = "1.18", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "compat-1-2", "unstable-winit-030"] }
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2"] }
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.6"
 edition = "2021"
 publish = false
 license = "MIT"
@@ -34,3 +34,9 @@ debug = false
 # Optimizing all host tools slows clean builds; keep the build toolchain unoptimized.
 [profile.dev.build-override]
 opt-level = 0
+
+# nix 0.31.3 does not compile for iOS: it reads the macOS-only utun constants on every Apple
+# target. The fix is on master but not in a release. Drop this when nix 0.31.4 is out.
+# webrtc (the jam) pulls nix in.
+[patch.crates-io]
+nix = { git = "https://github.com/nix-rust/nix", rev = "89339c618783622e3cdd8d7a6b17319a65337e94" }

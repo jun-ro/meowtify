@@ -20,8 +20,16 @@ meowtify-provider = { path = "../meowtify-provider" }
 meowtify-cache = { path = "../meowtify-cache" }
 meowtify-ui-view = { path = "../meowtify-ui-view" }
 getrandom = "0.3"
-rfd = "0.17"
 slint = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
 png = { version = "0.18", default-features = false }
 gif = { version = "0.14", default-features = false, features = ["std"] }
+
+# Desktop windows use winit with OpenGL (femtovg). femtovg needs glutin, which has no iOS
+# support, so iOS renders with Skia on Metal. rfd has no iOS backend either.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+rfd = "0.17"
+slint = { workspace = true, features = ["backend-winit", "renderer-femtovg", "unstable-winit-030"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+slint = { workspace = true, features = ["backend-winit", "renderer-skia"] }

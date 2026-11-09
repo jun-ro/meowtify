@@ -133,7 +133,7 @@ fn main() {
     };
     let autoplay_control = autoplay.as_ref().map(|a| a.control());
 
-    let result = meowtify_ui::run(handle, Services { source, library, downloads, yt_dlp, discord, autoplay: autoplay_control, open_links: Some(links_rx), settings }, events, rt_handle);
+    let result = meowtify_ui::run(handle, Services { source, library, downloads, yt_dlp, discord, autoplay: autoplay_control, open_links: Some(links_rx), dictation: None, settings }, events, rt_handle);
     stop.notify_one();
     if let Some(a) = &autoplay {
         a.stop();

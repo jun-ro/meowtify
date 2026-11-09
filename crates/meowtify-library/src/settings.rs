@@ -61,6 +61,11 @@ impl Default for Settings {
 /// `%APPDATA%\Meowtify`, or a `.meowtify` folder in the current directory when
 /// `APPDATA` is not set.
 pub fn config_dir() -> PathBuf {
+    // On iOS the app lives in a sandbox, and `HOME` is its container.
+    #[cfg(target_os = "ios")]
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join("Library").join("Application Support").join("Meowtify");
+    }
     match std::env::var_os("APPDATA") {
         Some(a) => PathBuf::from(a).join("Meowtify"),
         None => PathBuf::from(".meowtify"),

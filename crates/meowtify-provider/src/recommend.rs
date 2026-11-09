@@ -9,6 +9,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
+use crate::native::http;
 use crate::youtube::{music_search, parse_clock, url_encode};
 use crate::{Item, ProviderError, Result};
 
@@ -217,16 +218,22 @@ impl Recommender for YtMusicRadio {
             "isAudioOnly": true,
         })
         .to_string();
-        let out = crate::ytdlp::curl_post_json(NEXT_URL, &body, 10).await?;
-        parse_next(&out, &id)
+        let headers = [("User-Agent", http::DESKTOP_UA), ("Origin", "https://music.youtube.com")];
+        let answer = http::post_json_value(NEXT_URL, body.as_bytes(), &headers, 10 * 1024 * 1024, "YouTube Music").await?;
+        parse_next_value(&answer, &id)
     }
 }
 
 /// Reads the queue of a `next` answer. The seed itself is left out.
+#[cfg(test)]
 pub(crate) fn parse_next(body: &[u8], seed_id: &str) -> Result<Vec<Candidate>> {
     let v: Value = serde_json::from_slice(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
+    parse_next_value(&v, seed_id)
+}
+
+pub(crate) fn parse_next_value(v: &Value, seed_id: &str) -> Result<Vec<Candidate>> {
     let mut rows: Vec<&Value> = Vec::new();
-    collect(&v, "playlistPanelVideoRenderer", &mut rows);
+    collect(v, "playlistPanelVideoRenderer", &mut rows);
     let text = |v: Option<&Value>| -> Vec<String> {
         v.and_then(|x| x.get("runs"))
             .and_then(Value::as_array)
@@ -294,17 +301,23 @@ impl Recommender for DeezerRadio {
             return Err(ProviderError::Invalid("Deezer needs an artist".into()));
         }
         let q = url_encode(&format!("{} {}", seed.artist, seed.title));
-        let found = crate::ytdlp::curl_text(&format!("https://api.deezer.com/search?q={q}&limit=10")).await?;
-        let artist_id = deezer_artist_id(found.as_bytes(), &seed.title, &seed.artist, seed.duration_secs)
+        let headers = [("User-Agent", http::DESKTOP_UA)];
+        let found = http::get_json(&format!("https://api.deezer.com/search?q={q}&limit=10"), &headers, 4 * 1024 * 1024, "Deezer").await?;
+        let artist_id = deezer_artist_id_value(&found, &seed.title, &seed.artist, seed.duration_secs)
             .ok_or_else(|| ProviderError::Invalid("the artist was not found on Deezer".into()))?;
-        let radio = crate::ytdlp::curl_text(&format!("https://api.deezer.com/artist/{artist_id}/radio?limit=40")).await?;
-        parse_deezer_tracks(radio.as_bytes())
+        let radio = http::get_json(&format!("https://api.deezer.com/artist/{artist_id}/radio?limit=40"), &headers, 4 * 1024 * 1024, "Deezer").await?;
+        parse_deezer_tracks_value(&radio)
     }
 }
 
 /// The Deezer artist of the search result that best matches the seed song.
+#[cfg(test)]
 pub(crate) fn deezer_artist_id(body: &[u8], title: &str, artist: &str, secs: Option<u32>) -> Option<u64> {
     let v: Value = serde_json::from_slice(body).ok()?;
+    deezer_artist_id_value(&v, title, artist, secs)
+}
+
+pub(crate) fn deezer_artist_id_value(v: &Value, title: &str, artist: &str, secs: Option<u32>) -> Option<u64> {
     let rows = v.get("data")?.as_array()?;
     let mut as_items = Vec::new();
     for r in rows {
@@ -329,8 +342,13 @@ pub(crate) fn deezer_artist_id(body: &[u8], title: &str, artist: &str, secs: Opt
     best.id.parse().ok()
 }
 
+#[cfg(test)]
 pub(crate) fn parse_deezer_tracks(body: &[u8]) -> Result<Vec<Candidate>> {
     let v: Value = serde_json::from_slice(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
+    parse_deezer_tracks_value(&v)
+}
+
+pub(crate) fn parse_deezer_tracks_value(v: &Value) -> Result<Vec<Candidate>> {
     let rows = v.get("data").and_then(Value::as_array).ok_or_else(|| ProviderError::Parse("unexpected Deezer answer".into()))?;
     let out: Vec<Candidate> = rows
         .iter()
@@ -385,7 +403,14 @@ impl Recommender for LastFmSimilar {
             url_encode(&title),
             self.key
         );
-        parse_lastfm(crate::ytdlp::curl_text(&url).await?.as_bytes())
+        let answer = http::get_json(
+            &url,
+            &[("User-Agent", http::DESKTOP_UA)],
+            4 * 1024 * 1024,
+            "Last.fm",
+        )
+        .await?;
+        parse_lastfm_value(&answer)
     }
 }
 
@@ -405,8 +430,13 @@ pub(crate) fn normalize_for_lookup(title: &str) -> String {
     if t.is_empty() { title.trim().to_string() } else { t }
 }
 
+#[cfg(test)]
 pub(crate) fn parse_lastfm(body: &[u8]) -> Result<Vec<Candidate>> {
     let v: Value = serde_json::from_slice(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
+    parse_lastfm_value(&v)
+}
+
+pub(crate) fn parse_lastfm_value(v: &Value) -> Result<Vec<Candidate>> {
     if let Some(msg) = v.get("message").and_then(Value::as_str) {
         return Err(ProviderError::Tool(format!("Last.fm: {msg}")));
     }
@@ -432,8 +462,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_lastfm_answers() {
-        let body = br#"{"similartracks":{"track":[
+    fn reads_lastfm_answers() {        let body = br#"{"similartracks":{"track":[
             {"name":"Girl","duration":221,"match":1,"artist":{"name":"F.R. David"}},
             {"name":"No Length","duration":"0","artist":{"name":"X"}},
             {"duration":5}]}}"#;
@@ -544,5 +573,32 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!((got[0].artist.as_str(), got[0].duration_secs, got[0].item.is_none()), ("F.R. David", Some(221), true));
         assert!(parse_deezer_tracks(br#"{"error":{}}"#).is_err());
+    }
+
+    fn seed() -> Seed {
+        Seed {
+            title: "laced up".into(),
+            artist: "tsubi club".into(),
+            video_id: Some("MuBvAtoT-BI".into()),
+            duration_secs: Some(170),
+        }
+    }
+
+    /// Needs the network: `cargo test -p meowtify-provider --features native-extract live_youtube_radio -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_youtube_radio_uses_the_in_process_client() {
+        let got = YtMusicRadio.similar(&seed()).await.unwrap();
+        eprintln!("{} YouTube Music candidates, first {:?}", got.len(), got.first());
+        assert!(got.len() >= 5);
+    }
+
+    /// Needs the network: `cargo test -p meowtify-provider live_deezer_radio -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_deezer_radio_uses_the_in_process_client() {
+        let got = DeezerRadio.similar(&seed()).await.unwrap();
+        eprintln!("{} Deezer candidates, first {:?}", got.len(), got.first());
+        assert!(!got.is_empty());
     }
 }

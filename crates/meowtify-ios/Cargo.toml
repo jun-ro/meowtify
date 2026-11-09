@@ -1,0 +1,31 @@
+[package]
+name = "meowtify-ios"
+description = "iOS entry point. Wires the shared crates the way crates/meowtify does, without the desktop-only parts."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Pick the software renderer at run time instead of Skia (Metal). Both are compiled in.
+software = []
+
+# Everything is an iOS-only dependency, so `cargo build --workspace` on Windows stays fast.
+# femtovg is left out on purpose: it needs glutin, and glutin has no iOS support.
+[target.'cfg(target_os = "ios")'.dependencies]
+meowtify-core = { path = "../meowtify-core" }
+meowtify-library = { path = "../meowtify-library" }
+meowtify-player = { path = "../meowtify-player" }
+meowtify-provider = { path = "../meowtify-provider" }
+meowtify-autoplay = { path = "../meowtify-autoplay" }
+meowtify-ui = { path = "../meowtify-ui" }
+slint = { workspace = true, features = ["backend-winit", "renderer-skia", "renderer-software"] }
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSDictionary", "NSNotification", "NSValue", "NSURL", "NSObject", "NSOperation", "NSArray", "NSError", "block2"] }
+objc2-avf-audio = { version = "0.3", features = ["AVAudioSession", "AVAudioSessionTypes", "AVAudioApplication", "AVAudioBuffer", "AVAudioEngine", "AVAudioFormat", "AVAudioIONode", "AVAudioNode", "AVAudioTime", "AVAudioTypes", "block2"] }
+objc2-media-player = { version = "0.3", features = ["MPNowPlayingInfoCenter", "MPRemoteCommand", "MPRemoteCommandCenter", "MPRemoteCommandEvent", "MPMediaItem", "block2"] }
+objc2-ui-kit = { version = "0.3", features = ["UIApplication", "UIResponder"] }
+objc2-speech = { version = "0.3", default-features = false, features = ["std", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFTranscription", "block2", "objc2-avf-audio"] }

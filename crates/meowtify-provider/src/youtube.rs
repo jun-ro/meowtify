@@ -29,7 +29,7 @@ const FAST_PAGE: u32 = 20;
 /// How many ordinary results to fetch. One page, so no extra request.
 const GENERAL_COUNT: u32 = 20;
 /// YouTube Music search filter: songs only.
-const SONGS_FILTER: &str = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
+pub(crate) const SONGS_FILTER: &str = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
 const HOSTS: [&str; 5] = ["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"];
 
 /// Paths of the programs this provider runs.
@@ -344,7 +344,7 @@ fn parse_entry(line: &str) -> Result<Option<Item>> {
 }
 
 const MUSIC_SEARCH_URL: &str = "https://music.youtube.com/youtubei/v1/search?prettyPrint=false";
-const MUSIC_CLIENT_VERSION: &str = "1.20240724.01.00";
+pub(crate) const MUSIC_CLIENT_VERSION: &str = "1.20240724.01.00";
 
 /// Songs-only search through the YouTube Music web API. About 0.5 s, against 2 s or
 /// more for yt-dlp, and the answer already carries artist and length.
@@ -355,14 +355,21 @@ pub(crate) async fn music_search(q: &str, limit: usize) -> Result<Vec<Item>> {
         "params": SONGS_FILTER,
     })
     .to_string();
-    let out = crate::ytdlp::curl_post_json(MUSIC_SEARCH_URL, &body, 8).await?;
-    parse_music_search(&out, limit)
+    // In process, so this also works where curl cannot run (iOS).
+    let headers = [("User-Agent", crate::native::http::DESKTOP_UA), ("Origin", "https://music.youtube.com")];
+    let answer = crate::native::http::post_json_value(MUSIC_SEARCH_URL, body.as_bytes(), &headers, 8 * 1024 * 1024, "YouTube Music").await?;
+    parse_music_search_value(&answer, limit)
 }
 
 /// Reads the song rows of a YouTube Music search answer. Rows without a video id are skipped.
-fn parse_music_search(body: &[u8], limit: usize) -> Result<Vec<Item>> {
+#[cfg_attr(not(any(target_os = "ios", feature = "native-extract")), allow(dead_code))]
+pub(crate) fn parse_music_search(body: &[u8], limit: usize) -> Result<Vec<Item>> {
+    let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
+    parse_music_search_value(&v, limit)
+}
+
+pub(crate) fn parse_music_search_value(v: &serde_json::Value, limit: usize) -> Result<Vec<Item>> {
     use serde_json::Value;
-    let v: Value = serde_json::from_slice(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
     let sections = v
         .pointer("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents")
         .and_then(Value::as_array)
@@ -475,7 +482,7 @@ fn song_score(it: &Item) -> i32 {
 /// length, so those are copied from the matching ordinary result when there is one.
 /// Ordinary results are added only when there are too few songs, best audio first,
 /// so a video is shown only when no song exists.
-fn merge(songs: Vec<Item>, mut general: Vec<Item>, limit: usize) -> Vec<Item> {
+pub(crate) fn merge(songs: Vec<Item>, mut general: Vec<Item>, limit: usize) -> Vec<Item> {
     const ENOUGH: usize = 5;
     let mut out: Vec<Item> = Vec::with_capacity(limit);
     for mut s in songs {
@@ -647,6 +654,20 @@ impl Provider for YouTube {
     }
 }
 
+/// The next line of a program's output. A byte that is not UTF-8 (a title in a legacy code page)
+/// becomes a replacement character instead of ending the read with an error, which would fail
+/// the whole download after the song was already saved. The saved file is found by its id then.
+async fn next_line_lossy<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> std::io::Result<Option<String>> {
+    let mut buf = Vec::new();
+    if reader.read_until(0x0a, &mut buf).await? == 0 {
+        return Ok(None);
+    }
+    while matches!(buf.last(), Some(0x0a | 0x0d)) {
+        buf.pop();
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+}
+
 impl YouTube {
     pub(crate) async fn run_download(
         &self,
@@ -689,8 +710,8 @@ impl YouTube {
         let err_progress = progress.clone();
         let err_task = tokio::spawn(async move {
             let mut tail: Vec<String> = Vec::new();
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
+            let mut lines = BufReader::new(stderr);
+            while let Ok(Some(l)) = next_line_lossy(&mut lines).await {
                 if let Some(p) = parse_progress(&l) {
                     err_progress(p);
                     continue;
@@ -705,8 +726,8 @@ impl YouTube {
         });
 
         let mut file: Option<PathBuf> = None;
-        let mut lines = BufReader::new(stdout).lines();
-        while let Some(line) = lines.next_line().await.map_err(|e| ProviderError::Io(e.to_string()))? {
+        let mut lines = BufReader::new(stdout);
+        while let Some(line) = next_line_lossy(&mut lines).await.map_err(|e| ProviderError::Io(e.to_string()))? {
             if let Some(p) = parse_progress(&line) {
                 progress(p);
             } else if let Some(path) = line.strip_prefix(FILE_PREFIX) {
@@ -737,6 +758,15 @@ impl YouTube {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn output_with_a_stray_byte_is_still_read() {
+        let mut data: &[u8] = b"after_move:C:/m/You\x92re Under Arrest [abc].m4a\r\nnext\n";
+        let first = super::next_line_lossy(&mut data).await.unwrap().unwrap();
+        assert!(first.starts_with("after_move:") && first.ends_with("[abc].m4a"), "{first}");
+        assert_eq!(super::next_line_lossy(&mut data).await.unwrap().as_deref(), Some("next"));
+        assert_eq!(super::next_line_lossy(&mut data).await.unwrap(), None);
+    }
+
     use super::*;
 
     fn it(id: &str, title: &str, artist: &str, secs: u32) -> Item {

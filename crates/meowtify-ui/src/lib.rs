@@ -20,6 +20,7 @@ use slint::{
 use tokio::sync::broadcast;
 
 mod cache;
+mod dialogs;
 mod get;
 #[cfg(any(debug_assertions, feature = "dev"))]
 mod dev;
@@ -80,8 +81,17 @@ pub struct Services {
     pub autoplay: Option<meowtify_autoplay::Control>,
     /// `meowtify://jam/…` links that were opened from outside the app. `None` ignores them.
     pub open_links: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+    /// Speech to text for the search box. `None` hides the microphone button.
+    pub dictation: Option<Dictation>,
     /// The settings as read at startup. The window shows these and saves its own edits.
     pub settings: Settings,
+}
+
+/// Speech to text, supplied by the platform. `start` listens and calls the function it is given
+/// with the text heard so far and whether that text is final; it may call it from any thread.
+pub struct Dictation {
+    pub start: Box<dyn Fn(Box<dyn Fn(String, bool) + Send + Sync>)>,
+    pub stop: Box<dyn Fn()>,
 }
 
 /// Runs the window until it is closed. Must be called on the main thread.
@@ -91,8 +101,9 @@ pub fn run(
     mut events: broadcast::Receiver<Event>,
     rt: tokio::runtime::Handle,
 ) -> Result<(), slint::PlatformError> {
-    let Services { source, library, downloads, yt_dlp, discord, autoplay, open_links, settings } = services;
+    let Services { source, library, downloads, yt_dlp, discord, autoplay, open_links, dictation, settings } = services;
     let win = MainWindow::new()?;
+    win.set_touch(cfg!(target_os = "ios"));
     win.set_proxy(settings.proxy.as_str().into());
     win.set_app_version(
         format!("Meowtify v{}{}", env!("CARGO_PKG_VERSION"), if cfg!(debug_assertions) { " (debug build)" } else { "" }).into(),
@@ -354,6 +365,31 @@ pub fn run(
         {
             let get = get.clone();
             win.on_query_edited(move |t| get.query_edited(&t));
+        }
+        if let Some(dictation) = dictation {
+            win.set_dictation(true);
+            let Dictation { start, stop } = dictation;
+            let weak = win.as_weak();
+            win.on_dictate(move || {
+                let Some(w) = weak.upgrade() else { return };
+                w.set_heard(slint::SharedString::default());
+                w.set_dictating(true);
+                let weak = weak.clone();
+                start(Box::new(move |text, last| {
+                    let weak = weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = weak.upgrade() {
+                            w.set_heard(text.into());
+                            if last {
+                                w.set_dictating(false);
+                            }
+                        }
+                    });
+                }));
+            });
+            win.on_dictate_stop(move || {
+                stop();
+            });
         }
         {
             let get = get.clone();
@@ -660,11 +696,7 @@ impl Browser {
     /// Asks for a music folder, saves it, and rescans.
     fn choose_folder(self: &Rc<Self>) {
         let Some(library) = &self.library else { return };
-        let mut dialog = rfd::FileDialog::new().set_title("Choose your music folder");
-        if let Some(dir) = library.dir() {
-            dialog = dialog.set_directory(dir);
-        }
-        let Some(path) = dialog.pick_folder() else { return };
+        let Some(path) = crate::dialogs::pick_folder("Choose your music folder", library.dir()) else { return };
         library.set_dir(Some(path.clone()));
         update_settings(&self.win, |s| s.library_dir = Some(path));
         if let Some(w) = self.win.upgrade() {
@@ -1062,8 +1094,7 @@ fn apply_event(w: &MainWindow, event: Event) {
 /// has a video id (the disk cache makes this instant), a gradient otherwise.
 fn set_now_art(w: &MainWindow, t: &Track) {
     // A jam guest plays a cache file with no id in its name; the host sent the id.
-    let from_jam = jam::cover_key(&t.uri).filter(|k| valid_video_id(k));
-    match meowtify_core::youtube_id(&t.uri).map(str::to_string).or(from_jam) {
+    match meowtify_core::cover_id(&t.uri) {
         Some(v) => {
             w.set_now_vid(v.as_str().into());
             w.set_now_art(cover_of(&v));
