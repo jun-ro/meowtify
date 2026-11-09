@@ -104,7 +104,7 @@ fn clean(s: &str) -> String {
 
 /// The cover address of a download, when its file name carries a YouTube id.
 fn cover_url(path: &str) -> Option<String> {
-    meowtify_core::youtube_id(path).map(meowtify_core::youtube_thumbnail)
+    meowtify_core::cover_id(path).map(|id| meowtify_core::youtube_thumbnail(&id))
 }
 
 enum Msg {

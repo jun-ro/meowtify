@@ -17,7 +17,32 @@ pub fn download_id(path: &str) -> Option<&str> {
 /// from `A-Z a-z 0-9 - _`. Other providers' ids do not pass, so they never reach a YouTube address.
 pub fn youtube_id(path: &str) -> Option<&str> {
     let id = download_id(path)?;
-    (id.len() == 11 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')).then_some(id)
+    is_youtube_id(id).then_some(id)
+}
+
+/// A file with no id in its name that still has a cover: the song a jam guest plays, whose cache
+/// file is named by the host's song number. One entry is enough, because one song plays at a time.
+static EXTRA_COVER: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
+/// Says that the file at `path` has the cover of YouTube video `id`, or (with `None`) forgets it.
+/// An id that is not a YouTube id is ignored.
+pub fn set_cover_id(path: &str, id: Option<&str>) {
+    let entry = id.filter(|i| is_youtube_id(i)).map(|i| (path.to_string(), i.to_string()));
+    if let Ok(mut slot) = EXTRA_COVER.lock() {
+        *slot = entry;
+    }
+}
+
+/// The YouTube video id for a file's cover: the one in its name, else one set with [`set_cover_id`].
+pub fn cover_id(path: &str) -> Option<String> {
+    if let Some(id) = youtube_id(path) {
+        return Some(id.to_string());
+    }
+    EXTRA_COVER.lock().ok()?.as_ref().filter(|(p, _)| p == path).map(|(_, id)| id.clone())
+}
+
+fn is_youtube_id(id: &str) -> bool {
+    id.len() == 11 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// The address of a YouTube video's cover image. `video_id` must be a valid id.
@@ -39,6 +64,16 @@ mod tests {
         assert_eq!(download_id("/m/Song [dQw4w9WgXcQ] extra.mp3"), None);
         assert_eq!(download_id(r"C:\Music [dQw4w9WgXcQ].d\plain.mp3"), None, "a bracket in a folder name is not an id");
         assert_eq!(download_id("/m/Song [a].tar.gz"), Some("a"), "the extension may have a dot");
+    }
+
+    #[test]
+    fn a_file_without_an_id_can_be_given_a_cover() {
+        set_cover_id("/tmp/jam-3.audio", Some("NWrZ__uGAf4"));
+        assert_eq!(cover_id("/tmp/jam-3.audio").as_deref(), Some("NWrZ__uGAf4"));
+        assert_eq!(cover_id("/tmp/other.audio"), None);
+        assert_eq!(cover_id("/m/x [abc-_DEF123].m4a").as_deref(), Some("abc-_DEF123"), "the name still wins");
+        set_cover_id("/tmp/jam-3.audio", Some("short"));
+        assert_eq!(cover_id("/tmp/jam-3.audio"), None, "not a YouTube id");
     }
 
     #[test]

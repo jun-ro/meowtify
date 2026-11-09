@@ -14,7 +14,7 @@ meowtify-jam-relay = { git = "https://github.com/jun-ro/meowtify-relay", tag = "
 slint = { version = "1.18", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "compat-1-2", "unstable-winit-030"] }
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 publish = false
 license = "MIT"

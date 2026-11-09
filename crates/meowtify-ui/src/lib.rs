@@ -1062,8 +1062,7 @@ fn apply_event(w: &MainWindow, event: Event) {
 /// has a video id (the disk cache makes this instant), a gradient otherwise.
 fn set_now_art(w: &MainWindow, t: &Track) {
     // A jam guest plays a cache file with no id in its name; the host sent the id.
-    let from_jam = jam::cover_key(&t.uri).filter(|k| valid_video_id(k));
-    match meowtify_core::youtube_id(&t.uri).map(str::to_string).or(from_jam) {
+    match meowtify_core::cover_id(&t.uri) {
         Some(v) => {
             w.set_now_vid(v.as_str().into());
             w.set_now_art(cover_of(&v));
