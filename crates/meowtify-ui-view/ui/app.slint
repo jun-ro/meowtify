@@ -661,13 +661,17 @@ export component MainWindow inherits Window {
     /// The device is driven by touch: no hover, so a long press stands in for a right click.
     in property <bool> touch: false;
 
-    // The phone's queue sheet: drag the song tab up to show what is queued, drag it down to hide it.
+    // The phone's player card: drag its song tab up to lift it and show the queue under it, drag it down to put it back.
     /// Width of the song tab above the player panel.
     property <length> tab-w: min(root.width - 24px, 340px);
     /// The tab sits in the middle.
     property <length> tab-x: (root.width - root.tab-w) / 2;
-    /// How far the sheet can open, measured from the top of the player panel.
-    property <length> sheet-max: root.height - root.bar-h + 64px - root.safe-area-insets.top - 24px;
+    /// How far the player card can rise: from where it rests to just under the status bar.
+    property <length> sheet-max: root.height - root.bar-h - 16px - root.safe-area-insets.top - 8px;
+    /// Height of the tab bar at the bottom, with the room under it for the home indicator.
+    property <length> nav-h: root.bar-h - 148px;
+    /// Top of the player card. It rises with `sheet-t`, and the queue shows below it.
+    property <length> card-y: root.height - root.bar-h - 16px - root.sheet-t * root.sheet-max;
     in-out property <bool> sheet-open: false;
     property <bool> sheet-dragging: false;
     /// The drag so far, as a share of `sheet-max`. Up is positive.
@@ -2409,53 +2413,17 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Phone layout: the player panel, with the controls in the middle, the seek bar and the
-                // tabs. The song tab that sits on it, and the queue sheet, are drawn further down.
+                // Phone layout: the tab bar stays at the bottom. The player card above it, and the
+                // queue that opens under the card, are drawn further down.
                 if root.compact: Rectangle {
                     width: parent.width;
                     height: root.bar-h;
-                    // The panel runs down to the bottom edge, under the home indicator.
                     Rectangle {
-                        y: 64px;
-                        height: parent.height - 64px;
+                        y: 148px;
+                        height: parent.height - 148px;
                         background: Theme.panel;
-                        // The tab covers the middle of this line.
-                        Rectangle { x: 0; y: 0; width: root.tab-x; height: 1px; background: Theme.raised; }
-                        Rectangle { x: root.tab-x + root.tab-w; y: 0; width: parent.width - self.x; height: 1px; background: Theme.raised; }
+                        Rectangle { y: 0; height: 1px; background: Theme.raised; }
                         HorizontalLayout {
-                            y: 8px;
-                            width: parent.width;
-                            height: 44px;
-                            alignment: center;
-                            spacing: 18px;
-                            ToggleIcon { kind: "shuffle"; active: root.shuffle; clicked => { root.toggle-shuffle(); } }
-                            IconButton { kind: "prev"; clicked => { root.previous(); } }
-                            PlayButton { playing: root.playing; clicked => { root.play-pause(); } }
-                            IconButton { kind: "next"; clicked => { root.next(); } }
-                            ToggleIcon {
-                                kind: "repeat";
-                                active: root.repeat-mode != 0;
-                                badge: root.repeat-mode == 2 ? "1" : "";
-                                clicked => { root.cycle-repeat(); }
-                            }
-                        }
-                        HorizontalLayout {
-                            x: 12px;
-                            y: 56px;
-                            width: parent.width - 24px;
-                            height: 24px;
-                            spacing: 8px;
-                            Label { text: root.elapsed; color: Theme.muted; font-size: 14px; width: 40px; horizontal-alignment: right; vertical-alignment: center; }
-                            SeekBar {
-                                value: root.progress;
-                                horizontal-stretch: 1;
-                                seek(f) => { root.seek(f); }
-                            }
-                            Label { text: root.total; color: Theme.muted; font-size: 14px; width: 40px; horizontal-alignment: left; vertical-alignment: center; }
-                        }
-                        Rectangle { y: 84px; height: 1px; background: Theme.raised; }
-                        HorizontalLayout {
-                            y: 84px;
                             height: 56px;
                             TabButton { label: "Library"; active: root.view == 0; clicked => { root.view = 0; } }
                             TabButton { label: root.downloads-label; active: root.view == 3; clicked => { root.view = 3; } }
@@ -2469,34 +2437,33 @@ export component MainWindow inherits Window {
     }
     }
 
-    // Phone: the queue sheet. It grows upward from the top of the player panel.
+    // Phone: a dim layer over the page while the card is lifted. A tap on it puts the card back.
+    if root.compact && root.sheet-t > 0.001: Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height - root.nav-h;
+        background: #000000;
+        opacity: 0.5 * root.sheet-t;
+        TouchArea { clicked => { root.sheet-open = false; } }
+    }
+
+    // Phone: the queue. It fills the room the card leaves as it rises, down to the tab bar.
     if root.compact && root.sheet-t > 0.001: Rectangle {
         x: 0;
         width: root.width;
-        height: root.sheet-t * root.sheet-max;
-        y: root.height - root.bar-h + 64px - self.height;
+        y: root.card-y + 164px;
+        height: root.height - root.nav-h - self.y;
         background: Theme.panel;
-        border-radius: 18px;
         clip: true;
         VerticalLayout {
             padding-left: 16px;
             padding-right: 16px;
-            // Room for the song tab that sits over the bottom of the sheet.
-            padding-bottom: 84px;
             spacing: 4px;
-            // Dragging the header down closes the sheet.
+            // Dragging the header down puts the card back.
             Rectangle {
-                height: 52px;
-                Rectangle {
-                    y: 8px;
-                    x: (parent.width - self.width) / 2;
-                    width: 40px;
-                    height: 4px;
-                    border-radius: 2px;
-                    background: Theme.raised;
-                }
+                height: 44px;
                 Label {
-                    y: 16px;
                     text: "Up next";
                     color: Theme.text;
                     font-size: 20px;
@@ -2504,8 +2471,10 @@ export component MainWindow inherits Window {
                     vertical-alignment: center;
                 }
                 head-ta := TouchArea {
+                    property <length> start-y;
                     pointer-event(e) => {
                         if (e.kind == PointerEventKind.down) {
+                            self.start-y = self.absolute-position.y + self.mouse-y;
                             root.sheet-dragging = true;
                         } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
                             root.sheet-dragging = false;
@@ -2513,7 +2482,7 @@ export component MainWindow inherits Window {
                             root.sheet-drag = 0;
                         }
                     }
-                    moved => { root.sheet-drag = (self.pressed-y - self.mouse-y) / root.sheet-max; }
+                    moved => { root.sheet-drag = (self.start-y - (self.absolute-position.y + self.mouse-y)) / root.sheet-max; }
                 }
             }
             if root.up-next.length == 0: Label {
@@ -2562,94 +2531,145 @@ export component MainWindow inherits Window {
         }
     }
 
-    // Phone: the song tab. A tab with curved, sloping sides that rises from the middle of the
-    // player panel. Tap it for the lyrics; drag it up for the queue.
+    // Phone: the player card. A tab with curved, sloping sides rises from the middle of the
+    // panel, and the panel holds the controls and the seek bar. All of it moves together. Tap the
+    // tab for the lyrics, or drag it up to lift the card and show the queue.
     if root.compact: Rectangle {
-        x: root.tab-x;
-        y: root.height - root.bar-h - 16px;
-        width: root.tab-w;
-        height: 81px;
-        Path {
-            width: parent.width;
-            height: parent.height;
-            viewbox-width: root.tab-w / 1px;
-            viewbox-height: 81;
-            // An S-curve up from the panel's edge, the flat top, and the same curve back down.
-            commands: "M 0 81 C 20 81 24 2 44 2 L \{root.tab-w / 1px - 44} 2 C \{root.tab-w / 1px - 24} 2 \{root.tab-w / 1px - 20} 81 \{root.tab-w / 1px} 81";
-            fill: Theme.panel;
-            stroke: Theme.raised;
-            stroke-width: 1px;
-        }
-        // The chevron says the tab can be dragged: up to open the queue, down to close it.
-        Path {
-            x: (parent.width - 22px) / 2;
-            y: 8px;
-            width: 22px;
-            height: 10px;
-            viewbox-width: 22;
-            viewbox-height: 10;
-            commands: root.sheet-open ? "M 1 1 L 11 9 L 21 1" : "M 1 9 L 11 1 L 21 9";
-            stroke: Theme.muted;
-            stroke-width: 2.5px;
-            stroke-line-cap: round;
-            stroke-line-join: round;
-        }
+        x: 0;
+        y: root.card-y;
+        width: root.width;
+        height: 164px;
+        // The panel with the controls and the seek bar.
         Rectangle {
-            x: 0;
-            y: 24px;
-            width: parent.width;
-            height: 57px;
+            y: 80px;
+            height: 84px;
+            background: Theme.panel;
+            // The tab covers the middle of this line.
+            Rectangle { x: 0; y: 0; width: root.tab-x; height: 1px; background: Theme.raised; }
+            Rectangle { x: root.tab-x + root.tab-w; y: 0; width: parent.width - self.x; height: 1px; background: Theme.raised; }
             HorizontalLayout {
-                padding-left: 40px;
-                padding-right: 40px;
-                padding-top: 8px;
-                padding-bottom: 8px;
-                spacing: 10px;
-                Cover {
-                    side: 40px;
-                    source: root.now-art;
+                y: 8px;
+                width: parent.width;
+                height: 44px;
+                alignment: center;
+                spacing: 18px;
+                ToggleIcon { kind: "shuffle"; active: root.shuffle; clicked => { root.toggle-shuffle(); } }
+                IconButton { kind: "prev"; clicked => { root.previous(); } }
+                PlayButton { playing: root.playing; clicked => { root.play-pause(); } }
+                IconButton { kind: "next"; clicked => { root.next(); } }
+                ToggleIcon {
+                    kind: "repeat";
+                    active: root.repeat-mode != 0;
+                    badge: root.repeat-mode == 2 ? "1" : "";
+                    clicked => { root.cycle-repeat(); }
                 }
-                VerticalLayout {
-                    alignment: center;
+            }
+            HorizontalLayout {
+                x: 12px;
+                y: 56px;
+                width: parent.width - 24px;
+                height: 24px;
+                spacing: 8px;
+                Label { text: root.elapsed; color: Theme.muted; font-size: 14px; width: 40px; horizontal-alignment: right; vertical-alignment: center; }
+                SeekBar {
+                    value: root.progress;
                     horizontal-stretch: 1;
-                    spacing: 1px;
-                    Label {
-                        text: root.now-title != "" ? root.now-title : "Nothing playing";
-                        color: Theme.text;
-                        font-size: 16px;
-                        font-weight: 600;
-                        overflow: elide;
-                    }
-                    Label {
-                        text: root.status != "" ? root.status : root.now-artist;
-                        color: root.status != "" ? Theme.accent : Theme.muted;
-                        font-size: 14px;
-                        overflow: elide;
-                    }
+                    seek(f) => { root.seek(f); }
                 }
+                Label { text: root.total; color: Theme.muted; font-size: 14px; width: 40px; horizontal-alignment: left; vertical-alignment: center; }
             }
         }
-        song-tab-ta := TouchArea {
-            property <bool> far: false;
-            pointer-event(e) => {
-                if (e.kind == PointerEventKind.down) {
-                    self.far = false;
-                    root.sheet-dragging = true;
-                } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
-                    root.sheet-dragging = false;
-                    if (self.far) {
-                        root.sheet-open = ((root.sheet-open ? 1.0 : 0.0) + root.sheet-drag) > 0.35;
-                    } else if (root.sheet-open) {
-                        root.sheet-open = false;
-                    } else {
-                        root.toggle-lyrics();
+        // The tab.
+        Rectangle {
+            x: root.tab-x;
+            y: 0;
+            width: root.tab-w;
+            height: 81px;
+            Path {
+                width: parent.width;
+                height: parent.height;
+                viewbox-width: root.tab-w / 1px;
+                viewbox-height: 81;
+                // An S-curve up from the panel's edge, the flat top, and the same curve back down.
+                commands: "M 0 81 C 20 81 24 2 44 2 L \{root.tab-w / 1px - 44} 2 C \{root.tab-w / 1px - 24} 2 \{root.tab-w / 1px - 20} 81 \{root.tab-w / 1px} 81";
+                fill: Theme.panel;
+                stroke: Theme.raised;
+                stroke-width: 1px;
+            }
+            // The chevron says the tab can be dragged: up to open the queue, down to close it.
+            Path {
+                x: (parent.width - 22px) / 2;
+                y: 8px;
+                width: 22px;
+                height: 10px;
+                viewbox-width: 22;
+                viewbox-height: 10;
+                commands: root.sheet-open ? "M 1 1 L 11 9 L 21 1" : "M 1 9 L 11 1 L 21 9";
+                stroke: Theme.muted;
+                stroke-width: 2.5px;
+                stroke-line-cap: round;
+                stroke-line-join: round;
+            }
+            Rectangle {
+                x: 0;
+                y: 24px;
+                width: parent.width;
+                height: 57px;
+                HorizontalLayout {
+                    padding-left: 40px;
+                    padding-right: 40px;
+                    padding-top: 8px;
+                    padding-bottom: 8px;
+                    spacing: 10px;
+                    Cover {
+                        side: 40px;
+                        source: root.now-art;
                     }
-                    root.sheet-drag = 0;
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        spacing: 1px;
+                        Label {
+                            text: root.now-title != "" ? root.now-title : "Nothing playing";
+                            color: Theme.text;
+                            font-size: 16px;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+                        Label {
+                            text: root.status != "" ? root.status : root.now-artist;
+                            color: root.status != "" ? Theme.accent : Theme.muted;
+                            font-size: 14px;
+                            overflow: elide;
+                        }
+                    }
                 }
             }
-            moved => {
-                root.sheet-drag = (self.pressed-y - self.mouse-y) / root.sheet-max;
-                if (Math.abs(self.pressed-y - self.mouse-y) > 8px) { self.far = true; }
+            song-tab-ta := TouchArea {
+                property <bool> far: false;
+                property <length> start-y;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) {
+                        self.far = false;
+                        self.start-y = self.absolute-position.y + self.mouse-y;
+                        root.sheet-dragging = true;
+                    } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                        root.sheet-dragging = false;
+                        if (self.far) {
+                            root.sheet-open = ((root.sheet-open ? 1.0 : 0.0) + root.sheet-drag) > 0.35;
+                        } else if (root.sheet-open) {
+                            root.sheet-open = false;
+                        } else {
+                            root.toggle-lyrics();
+                        }
+                        root.sheet-drag = 0;
+                    }
+                }
+                // The tab moves with the finger, so the pointer is measured on the window, not on the tab.
+                moved => {
+                    root.sheet-drag = (self.start-y - (self.absolute-position.y + self.mouse-y)) / root.sheet-max;
+                    if (Math.abs(self.start-y - (self.absolute-position.y + self.mouse-y)) > 8px) { self.far = true; }
+                }
             }
         }
     }
