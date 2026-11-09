@@ -3,6 +3,8 @@
 //! shipped program does not read these environment variables.
 //!
 //! - `MEOWTIFY_VIEW=<n>` opens page `n`.
+//! - `MEOWTIFY_SIZE=<w>x<h>` sizes the window; a width under 700 gives the phone layout.
+//! - `MEOWTIFY_TOUCH=1` turns touch mode on (long press opens the row menu).
 //! - `MEOWTIFY_DIALOG=confirm|name` opens that dialog.
 //! - `MEOWTIFY_LYRICS=1` opens the lyrics panel.
 //! - `MEOWTIFY_QUERY=<text>` runs a provider search.
@@ -18,6 +20,16 @@ use crate::MainWindow;
 
 /// Applies the variables that are set. The returned timer must live as long as the window runs.
 pub(crate) fn install(win: &MainWindow) -> slint::Timer {
+    // `MEOWTIFY_SIZE=393x852` sizes the window like a phone; `MEOWTIFY_TOUCH=1` turns touch mode on.
+    if let Some((w, h)) = std::env::var("MEOWTIFY_SIZE").ok().and_then(|v| {
+        let (w, h) = v.split_once('x')?;
+        Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
+    }) {
+        win.window().set_size(slint::LogicalSize::new(w, h));
+    }
+    if std::env::var_os("MEOWTIFY_TOUCH").is_some() {
+        win.set_touch(true);
+    }
     if let Some(v) = std::env::var("MEOWTIFY_VIEW").ok().and_then(|v| v.parse::<i32>().ok()) {
         // After the startup logic, which may open Settings.
         let weak = win.as_weak();

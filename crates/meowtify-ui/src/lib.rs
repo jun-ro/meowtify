@@ -94,6 +94,7 @@ pub fn run(
 ) -> Result<(), slint::PlatformError> {
     let Services { source, library, downloads, yt_dlp, discord, autoplay, open_links, settings } = services;
     let win = MainWindow::new()?;
+    win.set_touch(cfg!(target_os = "ios"));
     win.set_proxy(settings.proxy.as_str().into());
     win.set_app_version(
         format!("Meowtify v{}{}", env!("CARGO_PKG_VERSION"), if cfg!(debug_assertions) { " (debug build)" } else { "" }).into(),
