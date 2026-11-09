@@ -647,6 +647,20 @@ impl Provider for YouTube {
     }
 }
 
+/// The next line of a program's output. A byte that is not UTF-8 (a title in a legacy code page)
+/// becomes a replacement character instead of ending the read with an error, which would fail
+/// the whole download after the song was already saved. The saved file is found by its id then.
+async fn next_line_lossy<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> std::io::Result<Option<String>> {
+    let mut buf = Vec::new();
+    if reader.read_until(0x0a, &mut buf).await? == 0 {
+        return Ok(None);
+    }
+    while matches!(buf.last(), Some(0x0a | 0x0d)) {
+        buf.pop();
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+}
+
 impl YouTube {
     pub(crate) async fn run_download(
         &self,
@@ -689,8 +703,8 @@ impl YouTube {
         let err_progress = progress.clone();
         let err_task = tokio::spawn(async move {
             let mut tail: Vec<String> = Vec::new();
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(l)) = lines.next_line().await {
+            let mut lines = BufReader::new(stderr);
+            while let Ok(Some(l)) = next_line_lossy(&mut lines).await {
                 if let Some(p) = parse_progress(&l) {
                     err_progress(p);
                     continue;
@@ -705,8 +719,8 @@ impl YouTube {
         });
 
         let mut file: Option<PathBuf> = None;
-        let mut lines = BufReader::new(stdout).lines();
-        while let Some(line) = lines.next_line().await.map_err(|e| ProviderError::Io(e.to_string()))? {
+        let mut lines = BufReader::new(stdout);
+        while let Some(line) = next_line_lossy(&mut lines).await.map_err(|e| ProviderError::Io(e.to_string()))? {
             if let Some(p) = parse_progress(&line) {
                 progress(p);
             } else if let Some(path) = line.strip_prefix(FILE_PREFIX) {
@@ -737,6 +751,15 @@ impl YouTube {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn output_with_a_stray_byte_is_still_read() {
+        let mut data: &[u8] = b"after_move:C:/m/You\x92re Under Arrest [abc].m4a\r\nnext\n";
+        let first = super::next_line_lossy(&mut data).await.unwrap().unwrap();
+        assert!(first.starts_with("after_move:") && first.ends_with("[abc].m4a"), "{first}");
+        assert_eq!(super::next_line_lossy(&mut data).await.unwrap().as_deref(), Some("next"));
+        assert_eq!(super::next_line_lossy(&mut data).await.unwrap(), None);
+    }
+
     use super::*;
 
     fn it(id: &str, title: &str, artist: &str, secs: u32) -> Item {

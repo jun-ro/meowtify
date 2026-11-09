@@ -87,14 +87,26 @@ fn read_track(path: &Path, interner: &mut Interner) -> Option<Track> {
     let artist = interner.artist(artist_name.as_deref().unwrap_or("Unknown artist"));
     let album = album_name.map(|a| interner.album(&a, &artist));
     let uri = path.to_string_lossy().into_owned();
+    let name: Arc<str> = title.as_deref().unwrap_or_else(|| name_from_stem(stem, &uri)).into();
     Some(Track {
         id: path_id(&uri).into(),
         uri: uri.into(),
-        name: title.as_deref().unwrap_or(stem).into(),
+        name,
         artists: Arc::from(vec![artist]),
         album,
         duration_ms: tagged.properties().duration().as_millis().min(u32::MAX as u128) as u32,
     })
+}
+
+/// The title for a file with no title tag: its name, without the ` [id]` a download carries.
+fn name_from_stem<'a>(stem: &'a str, path: &str) -> &'a str {
+    if meowtify_core::download_id(path).is_none() {
+        return stem;
+    }
+    match stem.rfind(" [") {
+        Some(i) if stem.ends_with(']') && i > 0 => &stem[..i],
+        _ => stem,
+    }
 }
 
 /// Scans `dir` and returns its tracks sorted by artist, album, title.
@@ -139,6 +151,14 @@ pub(crate) fn read_one(path: &Path) -> Option<Track> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_download_name_loses_its_id_as_a_title() {
+        assert_eq!(super::name_from_stem("( T_T ) [P2oz2RBtjWQ]", "/m/( T_T ) [P2oz2RBtjWQ].m4a"), "( T_T )");
+        assert_eq!(super::name_from_stem("Song [live]", "/m/Song [live].m4a"), "Song", "any id counts as a download id");
+        assert_eq!(super::name_from_stem("Song", "/m/Song.m4a"), "Song");
+        assert_eq!(super::name_from_stem("[x]", "/m/[x].m4a"), "[x]", "nothing is left of the name otherwise");
+    }
+
     use super::*;
 
     #[test]
