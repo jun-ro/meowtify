@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use std::time::Instant;
 
+#[cfg(not(target_os = "ios"))]
 use slint::winit_030::{winit, WinitWindowAccessor};
 use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode};
 
@@ -212,7 +213,12 @@ impl Mascot {
         };
         let Some(w) = self.win.upgrade() else { return };
         w.set_mascot(Image::from_rgba8(buf.clone()));
+        // The window and taskbar icon is a desktop idea; iOS has no such thing.
+        #[cfg(not(target_os = "ios"))]
         let due = self.icon_at.get().is_none_or(|t| t.elapsed() >= ICON_EVERY);
+        #[cfg(target_os = "ios")]
+        let due = false;
+        #[cfg(not(target_os = "ios"))]
         if due {
             let icon = winit::window::Icon::from_rgba(buf.as_bytes().to_vec(), SIDE as u32, SIDE as u32).ok();
             // None until the OS window exists; the next frame tries again.

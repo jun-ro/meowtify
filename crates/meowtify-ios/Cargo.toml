@@ -1,6 +1,6 @@
 [package]
 name = "meowtify-ios"
-description = "iOS entry point. Phase 1 spike: proves the toolchain, the renderer and the sideload path."
+description = "iOS entry point. Wires the shared crates the way crates/meowtify does, without the desktop-only parts."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -11,7 +11,12 @@ repository.workspace = true
 # Pick the software renderer at run time instead of Skia (Metal). Both are compiled in.
 software = []
 
-# Slint is pulled in on iOS only, so `cargo build --workspace` on Windows stays fast.
+# Everything is an iOS-only dependency, so `cargo build --workspace` on Windows stays fast.
 # femtovg is left out on purpose: it needs glutin, and glutin has no iOS support.
 [target.'cfg(target_os = "ios")'.dependencies]
-slint = { version = "1.18", default-features = false, features = ["std", "backend-winit", "renderer-skia", "renderer-software", "compat-1-2"] }
+meowtify-core = { path = "../meowtify-core" }
+meowtify-library = { path = "../meowtify-library" }
+meowtify-player = { path = "../meowtify-player" }
+meowtify-ui = { path = "../meowtify-ui" }
+slint = { workspace = true, features = ["backend-winit", "renderer-skia", "renderer-software"] }
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }

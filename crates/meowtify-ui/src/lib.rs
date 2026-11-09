@@ -20,6 +20,7 @@ use slint::{
 use tokio::sync::broadcast;
 
 mod cache;
+mod dialogs;
 mod get;
 #[cfg(any(debug_assertions, feature = "dev"))]
 mod dev;
@@ -660,11 +661,7 @@ impl Browser {
     /// Asks for a music folder, saves it, and rescans.
     fn choose_folder(self: &Rc<Self>) {
         let Some(library) = &self.library else { return };
-        let mut dialog = rfd::FileDialog::new().set_title("Choose your music folder");
-        if let Some(dir) = library.dir() {
-            dialog = dialog.set_directory(dir);
-        }
-        let Some(path) = dialog.pick_folder() else { return };
+        let Some(path) = crate::dialogs::pick_folder("Choose your music folder", library.dir()) else { return };
         library.set_dir(Some(path.clone()));
         update_settings(&self.win, |s| s.library_dir = Some(path));
         if let Some(w) = self.win.upgrade() {
@@ -1062,8 +1059,7 @@ fn apply_event(w: &MainWindow, event: Event) {
 /// has a video id (the disk cache makes this instant), a gradient otherwise.
 fn set_now_art(w: &MainWindow, t: &Track) {
     // A jam guest plays a cache file with no id in its name; the host sent the id.
-    let from_jam = jam::cover_key(&t.uri).filter(|k| valid_video_id(k));
-    match meowtify_core::youtube_id(&t.uri).map(str::to_string).or(from_jam) {
+    match meowtify_core::cover_id(&t.uri) {
         Some(v) => {
             w.set_now_vid(v.as_str().into());
             w.set_now_art(cover_of(&v));

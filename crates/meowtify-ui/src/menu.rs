@@ -249,14 +249,8 @@ impl Browser {
             return;
         }
         let safe: String = p.name.chars().map(|c| if "<>:\"/\\|?*".contains(c) || c.is_control() { '_' } else { c }).collect();
-        let mut dialog = rfd::FileDialog::new()
-            .set_title("Export playlist")
-            .set_file_name(format!("{}.m3u8", safe.trim()))
-            .add_filter("Playlist", &["m3u8", "m3u"]);
-        if let Some(dir) = library.dir() {
-            dialog = dialog.set_directory(dir);
-        }
-        let Some(path) = dialog.save_file() else { return };
+        let name = format!("{}.m3u8", safe.trim());
+        let Some(path) = crate::dialogs::save_file("Export playlist", &name, ("Playlist", &["m3u8", "m3u"]), library.dir()) else { return };
         let library = library.clone();
         let id = id.to_string();
         self.rt.spawn_blocking(move || {
@@ -337,11 +331,7 @@ impl Browser {
 
     /// The tile in the dialog was clicked: choose an image file.
     pub(crate) fn pick_cover(&self) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Choose a cover image")
-            .add_filter("Images", &["png", "jpg", "jpeg"])
-            .pick_file()
-        else {
+        let Some(path) = crate::dialogs::pick_file("Choose a cover image", ("Images", &["png", "jpg", "jpeg"])) else {
             return;
         };
         match process_cover(&path) {

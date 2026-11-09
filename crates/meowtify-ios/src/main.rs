@@ -1,67 +1,91 @@
-//! iOS entry point. Phase 1 spike: a one-screen Slint app.
+//! iOS entry point.
 //!
-//! It answers three questions before any real porting starts:
-//! 1. Does the iOS toolchain build and package without Xcode on this machine?
-//! 2. Does Slint run on iOS, and with which renderer (Skia on Metal, or software)?
-//! 3. Does a sideloaded build install and start on the device?
+//! Phase 2: the shared app (core, library, player, UI) on a phone, with local files only.
+//! Left out on purpose, each for a reason:
+//! - yt-dlp, downloads, YouTube, SoundCloud, Audius, autoplay: they need yt-dlp, and iOS cannot
+//!   run a subprocess. Phase 3 replaces that with in-process code.
+//! - Discord, deep links, the single-instance socket, self-update: desktop ideas.
 
 #[cfg(target_os = "ios")]
 mod app {
-    slint::slint! {
-        export component Spike inherits Window {
-            in property <string> renderer;
-            in-out property <int> taps;
-            background: #14111f;
-            VerticalLayout {
-                alignment: center;
-                spacing: 16px;
-                padding: 24px;
-                Text {
-                    text: "Meowtify";
-                    color: white;
-                    font-size: 32px;
-                    horizontal-alignment: center;
-                }
-                Text {
-                    text: "iOS spike. Renderer: " + root.renderer;
-                    color: #b9b4d6;
-                    font-size: 16px;
-                    horizontal-alignment: center;
-                }
-                Rectangle {
-                    height: 64px;
-                    background: #7c5cff;
-                    border-radius: 12px;
-                    TouchArea {
-                        clicked => { root.taps += 1; }
-                    }
-                    Text {
-                        text: "Taps: " + root.taps;
-                        color: white;
-                        font-size: 20px;
-                    }
-                }
-            }
-        }
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use meowtify_core::{run, AppHandle, Command, MetadataSource, PlaybackEngine};
+    use meowtify_library::{config_dir, Library, Settings};
+    use meowtify_player::LocalPlayer;
+    use meowtify_ui::Services;
+
+    /// The app's Documents folder. Info.plist shares it with the Files app, so the user
+    /// can copy music into it from there.
+    fn documents_dir() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Documents"))
     }
 
-    pub fn run() -> Result<(), slint::PlatformError> {
+    pub fn main() {
         let renderer = if cfg!(feature = "software") { "software" } else { "skia" };
-        slint::BackendSelector::new()
+        if let Err(e) = slint::BackendSelector::new()
             .backend_name("winit".to_string())
             .renderer_name(renderer.to_string())
-            .select()?;
-        let ui = Spike::new()?;
-        ui.set_renderer(renderer.into());
-        ui.run()
+            .select()
+        {
+            eprintln!("meowtify-ios: no {renderer} renderer: {e}");
+            return;
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(16)
+            .build()
+            .expect("tokio runtime");
+
+        let settings = Settings::load();
+        let music = settings.library_dir.clone().or_else(documents_dir);
+        let _ = std::fs::create_dir_all(config_dir());
+        if let Some(dir) = &music {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let library = Arc::new(Library::new(music).with_playlist_file(config_dir().join("playlists.json")));
+        let engine: Arc<dyn PlaybackEngine> = Arc::new(LocalPlayer::new(library.clone()));
+        let source: Arc<dyn MetadataSource> = library.clone();
+
+        let rt_handle = rt.handle().clone();
+        let (handle, commands) = AppHandle::new(32, 64);
+        let events = handle.subscribe();
+        let sender = handle.event_sender();
+        std::thread::spawn(move || rt.block_on(run(engine, commands, sender)));
+
+        // Local playback moves on its own (progress, next track), so ask for its state every second.
+        let poll = handle.clone();
+        rt_handle.spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if poll.send(Command::Refresh).await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        let services = Services {
+            source,
+            library: Some(library),
+            downloads: None,
+            yt_dlp: None,
+            discord: None,
+            autoplay: None,
+            open_links: None,
+            settings,
+        };
+        if let Err(e) = meowtify_ui::run(handle, services, events, rt_handle) {
+            eprintln!("ui error: {e}");
+        }
     }
 }
 
 #[cfg(target_os = "ios")]
 fn main() {
-    if let Err(err) = app::run() {
-        eprintln!("meowtify-ios: {err}");
-    }
+    app::main();
 }
 
 #[cfg(not(target_os = "ios"))]
