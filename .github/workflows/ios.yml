@@ -1,0 +1,47 @@
+name: iOS
+
+# Builds unsigned .ipa files for sideloading. Runs on a Mac runner because only Apple's
+# toolchain can link for iOS. Push to the `ios` branch, or start it by hand.
+on:
+  push:
+    branches: [ios]
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ios
+          save-if: ${{ github.ref == 'refs/heads/ios' }}
+      - name: Version
+        id: version
+        run: echo "value=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+      - name: Build with Skia (Metal)
+        run: |
+          cargo build --release --locked -p meowtify-ios --target aarch64-apple-ios
+          bash crates/meowtify-ios/ios/package.sh target/aarch64-apple-ios/release/meowtify-ios \
+            "${{ steps.version.outputs.value }}" dist/Meowtify-skia.ipa
+      - name: Build with the software renderer
+        run: |
+          cargo build --release --locked -p meowtify-ios --target aarch64-apple-ios --features software
+          bash crates/meowtify-ios/ios/package.sh target/aarch64-apple-ios/release/meowtify-ios \
+            "${{ steps.version.outputs.value }}" dist/Meowtify-software.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meowtify-ios
+          path: dist/*.ipa
+          if-no-files-found: error
