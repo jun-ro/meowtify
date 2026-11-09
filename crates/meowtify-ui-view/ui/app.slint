@@ -321,6 +321,8 @@ component SourceItem inherits Rectangle {
     in property <bool> playlist: false;
     in property <image> cover;
     in property <bool> active;
+    /// Touch screen: a long press opens the context menu.
+    in property <bool> touch: false;
     callback clicked();
     /// Right button released; x and y are in window coordinates.
     callback context(length, length);
@@ -328,12 +330,36 @@ component SourceItem inherits Rectangle {
     border-radius: 8px;
     background: root.active ? Theme.accent-dim : (ta.has-hover ? Theme.raised : transparent);
     animate background { duration: 140ms; }
+    /// A long press opened the menu, so the release that follows is not a click.
+    property <bool> long-pressed: false;
+    lp := Timer {
+        interval: 450ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.long-pressed = true;
+            root.context(ta.absolute-position.x + ta.mouse-x, ta.absolute-position.y + ta.mouse-y);
+        }
+    }
     ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
-        clicked => { root.clicked(); }
+        clicked => {
+            if (root.long-pressed) {
+                root.long-pressed = false;
+            } else {
+                root.clicked();
+            }
+        }
         pointer-event(e) => {
             if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
                 root.context(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+            if (root.touch && e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                root.long-pressed = false;
+                lp.running = true;
+            }
+            if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                lp.running = false;
             }
         }
     }
@@ -638,6 +664,37 @@ component SourceChip inherits Rectangle {
         font-weight: 700;
         horizontal-alignment: center;
         vertical-alignment: center;
+    }
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+/// A download in the phone's row under the search bar. The fill grows as the song downloads.
+component DownloadChip inherits Rectangle {
+    in property <string> label;
+    in property <float> progress;
+    in property <bool> active;
+    in property <bool> failed;
+    callback clicked();
+    width: 130px;
+    height: 32px;
+    border-radius: 16px;
+    clip: true;
+    background: Theme.raised;
+    Rectangle {
+        x: 0;
+        width: parent.width * (root.active ? root.progress : (root.failed ? 0 : 1));
+        background: Theme.accent-dim;
+        animate width { duration: 200ms; }
+    }
+    Label {
+        x: 14px;
+        width: parent.width - 28px;
+        text: root.label;
+        color: root.failed ? #e5484d : (root.active ? Theme.text : Theme.accent);
+        font-size: 14px;
+        font-weight: 700;
+        vertical-alignment: center;
+        overflow: elide;
     }
     TouchArea { clicked => { root.clicked(); } }
 }
@@ -1286,32 +1343,65 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Playlists as a row of chips, on a phone.
-                if root.compact && root.view == 0: Flickable {
+                // Phone: All Songs on the left, a bar, and the download queue where the playlists were.
+                // The playlists have their own tab.
+                if root.compact && root.view == 0: Rectangle {
                     height: 44px;
-                    // The chips are wider than the screen. Without this the column grows to fit them.
-                    min-width: 0px;
-                    preferred-width: 0px;
-                    content-width: chips.preferred-width;
-                    chips := HorizontalLayout {
+                    HorizontalLayout {
                         padding-left: 16px;
                         padding-right: 16px;
                         padding-top: 6px;
                         padding-bottom: 6px;
-                        spacing: 8px;
-                        alignment: start;
-                        for name[i] in root.sources: SourceChip {
-                            label: name;
-                            active: !root.show-results && i == root.current-source;
+                        spacing: 10px;
+                        SourceChip {
+                            label: "All Songs";
+                            active: !root.show-results && root.current-source == 0;
                             clicked => {
                                 root.show-results = false;
-                                root.current-source = i;
-                                root.source-selected(i);
+                                root.current-source = 0;
+                                root.source-selected(0);
                             }
                         }
-                        SourceChip {
-                            label: "+ New";
-                            clicked => { root.ctx(2, -1, "new", -1); }
+                        // The playlist that is open.
+                        if root.current-source > 0: SourceChip {
+                            label: root.sources[root.current-source];
+                            active: !root.show-results;
+                            clicked => { root.view = 2; }
+                        }
+                        Rectangle {
+                            width: 2px;
+                            border-radius: 1px;
+                            background: #3a3a42;
+                        }
+                        // Downloads, newest first. A tap opens the whole list.
+                        Flickable {
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                            preferred-width: 0px;
+                            content-width: dq.preferred-width;
+                            dq := HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                if root.queue.length == 0: Rectangle {
+                                    width: 130px;
+                                    Label {
+                                        text: "Nothing queued";
+                                        color: Theme.muted;
+                                        font-size: 14px;
+                                        vertical-alignment: center;
+                                    }
+                                    TouchArea { clicked => { root.view = 3; } }
+                                }
+                                for j[idx] in root.queue: DownloadChip {
+                                    visible: idx < 4 && !j.leaving;
+                                    width: (idx < 4 && !j.leaving) ? 130px : 0px;
+                                    label: j.title;
+                                    progress: j.progress;
+                                    active: j.active;
+                                    failed: j.failed;
+                                    clicked => { root.view = 3; }
+                                }
+                            }
                         }
                     }
                 }
@@ -1956,6 +2046,47 @@ export component MainWindow inherits Window {
                 }
 
 
+                // Playlists pane. On a phone the sidebar's list lives here.
+                Rectangle {
+                    opacity: root.view == 2 ? 1 : 0;
+                    animate opacity { duration: 160ms; easing: ease-out; }
+                    visible: root.view == 2 || self.opacity > 0.01;
+                    width: 100%;
+                    height: 100%;
+                    background: Theme.bg;
+                    TouchArea { }
+                    Flickable {
+                        content-width: self.width;
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 4px;
+                            alignment: start;
+                            Label { text: "Playlists"; color: Theme.text; font-size: 24px; font-weight: 800; height: 44px; }
+                            for name[i] in root.sources: SourceItem {
+                                label: name;
+                                playlist: i > 0;
+                                cover: root.source-art[i];
+                                has-icon: i == 0;
+                                bare-icon: i == 0;
+                                icon: @image-url("../../../assets/icon/songs-pixel.png");
+                                touch: root.touch;
+                                active: i == root.current-source;
+                                context(x, y) => { if (i > 0) { root.open-menu(2, i - 1, true, x, y); } }
+                                clicked => {
+                                    root.view = 0;
+                                    root.show-results = false;
+                                    root.current-source = i;
+                                    root.source-selected(i);
+                                }
+                            }
+                            SourceItem {
+                                label: "+ New playlist";
+                                clicked => { root.ctx(2, -1, "new", -1); }
+                            }
+                        }
+                    }
+                }
+
                 // Jam pane.
                 Rectangle {
                     opacity: root.view == 4 ? 1 : 0;
@@ -2426,7 +2557,7 @@ export component MainWindow inherits Window {
                         HorizontalLayout {
                             height: 56px;
                             TabButton { label: "Library"; active: root.view == 0; clicked => { root.view = 0; } }
-                            TabButton { label: root.downloads-label; active: root.view == 3; clicked => { root.view = 3; } }
+                            TabButton { label: "Playlists"; active: root.view == 2; clicked => { root.view = 2; } }
                             TabButton { label: "Jam"; active: root.view == 4; clicked => { root.view = 4; } }
                             TabButton { label: "Settings"; active: root.view == 1; clicked => { root.view = 1; } }
                         }
