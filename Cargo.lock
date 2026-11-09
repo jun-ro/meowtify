@@ -3299,7 +3299,8 @@ dependencies = [
 
 [[package]]
 name = "meowtify-jam"
-version = "0.1.6"
+version = "0.1.0"
+source = "git+https://github.com/jun-ro/meowtify-relay?tag=v0.1.2#977e810433ba7b7f26ca8fc55a10ad3beb37c6f1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3324,14 +3325,14 @@ dependencies = [
 
 [[package]]
 name = "meowtify-jam-relay"
-version = "0.1.6"
+version = "0.1.0"
+source = "git+https://github.com/jun-ro/meowtify-relay?tag=v0.1.2#977e810433ba7b7f26ca8fc55a10ad3beb37c6f1"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
  "getrandom 0.4.3",
  "hmac 0.13.0",
  "meowtify-jam",
- "serde_json",
  "sha1 0.11.0",
  "tokio",
  "tokio-tungstenite",
