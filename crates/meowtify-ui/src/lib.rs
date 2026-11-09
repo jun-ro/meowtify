@@ -55,6 +55,7 @@ thread_local! {
     static AUTOPLAY: RefCell<Option<meowtify_autoplay::Control>> = const { RefCell::new(None) };
     /// The model behind the queue panel, the video id of each of its songs, and the covers
     /// that arrived (so a rebuilt panel does not load them again).
+    static FOLDER_PICKER: RefCell<Option<Rc<dyn Fn(Box<dyn FnOnce(Option<std::path::PathBuf>) + Send>)>>> = const { RefCell::new(None) };
     static UP_NEXT_MODEL: RefCell<Option<Rc<VecModel<UpNext>>>> = const { RefCell::new(None) };
     static UP_NEXT_VIDS: RefCell<Vec<Option<String>>> = const { RefCell::new(Vec::new()) };
     /// Cover image loader. Its answers find the pages that wait for them here.
@@ -83,9 +84,16 @@ pub struct Services {
     pub open_links: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     /// Speech to text for the search box. `None` hides the microphone button.
     pub dictation: Option<Dictation>,
+    /// A folder picker that answers later (iOS shows its own browser). `None` uses the desktop's
+    /// dialog. The function is given what to do with the folder, or `None` when cancelled.
+    pub folder_picker: Option<FolderPicker>,
     /// The settings as read at startup. The window shows these and saves its own edits.
     pub settings: Settings,
 }
+
+/// Asks the platform for a music folder without waiting: `done` runs, on any thread, when the user
+/// has chosen or cancelled.
+pub type FolderPicker = Box<dyn Fn(Box<dyn FnOnce(Option<std::path::PathBuf>) + Send>)>;
 
 /// Speech to text, supplied by the platform. `start` listens and calls the function it is given
 /// with the text heard so far and whether that text is final; it may call it from any thread.
@@ -101,7 +109,7 @@ pub fn run(
     mut events: broadcast::Receiver<Event>,
     rt: tokio::runtime::Handle,
 ) -> Result<(), slint::PlatformError> {
-    let Services { source, library, downloads, yt_dlp, discord, autoplay, open_links, dictation, settings } = services;
+    let Services { source, library, downloads, yt_dlp, discord, autoplay, open_links, dictation, folder_picker, settings } = services;
     let win = MainWindow::new()?;
     win.set_touch(cfg!(target_os = "ios"));
     win.set_proxy(settings.proxy.as_str().into());
@@ -365,6 +373,9 @@ pub fn run(
         {
             let get = get.clone();
             win.on_query_edited(move |t| get.query_edited(&t));
+        }
+        if let Some(pick) = folder_picker {
+            FOLDER_PICKER.with(|p| *p.borrow_mut() = Some(Rc::from(pick)));
         }
         if let Some(dictation) = dictation {
             win.set_dictation(true);
@@ -696,7 +707,27 @@ impl Browser {
     /// Asks for a music folder, saves it, and rescans.
     fn choose_folder(self: &Rc<Self>) {
         let Some(library) = &self.library else { return };
+        // iOS answers later, from its own browser.
+        if let Some(pick) = FOLDER_PICKER.with(|p| p.borrow().clone()) {
+            pick(Box::new(|path| {
+                let Some(path) = path else { return };
+                let _ = slint::invoke_from_event_loop(move || {
+                    BROWSER.with(|b| {
+                        if let Some(b) = b.borrow().as_ref() {
+                            b.folder_chosen(path);
+                        }
+                    });
+                });
+            }));
+            return;
+        }
         let Some(path) = crate::dialogs::pick_folder("Choose your music folder", library.dir()) else { return };
+        self.folder_chosen(path);
+    }
+
+    /// A music folder was picked: use it, save it, and rescan.
+    fn folder_chosen(self: &Rc<Self>, path: std::path::PathBuf) {
+        let Some(library) = &self.library else { return };
         library.set_dir(Some(path.clone()));
         update_settings(&self.win, |s| s.library_dir = Some(path));
         if let Some(w) = self.win.upgrade() {

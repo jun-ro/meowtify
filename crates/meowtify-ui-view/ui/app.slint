@@ -2669,6 +2669,68 @@ export component MainWindow inherits Window {
                     moved => { root.sheet-drag = (self.start-y - (self.absolute-position.y + self.mouse-y)) / root.sheet-max; }
                 }
             }
+            // Volume and lyrics, where a thumb reaches them.
+            HorizontalLayout {
+                height: 44px;
+                spacing: 10px;
+                Rectangle {
+                    width: 16px;
+                    Path {
+                        width: 16px;
+                        height: 14px;
+                        y: (parent.height - self.height) / 2;
+                        viewbox-width: 16;
+                        viewbox-height: 14;
+                        commands: "M 0 4 L 4 4 L 9 0 L 9 14 L 4 10 L 0 10 Z";
+                        fill: Theme.muted;
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    VolumeBar {
+                        y: (parent.height - self.height) / 2;
+                        width: parent.width;
+                        height: 28px;
+                        value: root.volume / 100.0;
+                        changed(f) => { root.volume = Math.round(f * 100); root.set-volume(root.volume); }
+                    }
+                }
+                Label {
+                    text: "\{root.volume}%";
+                    color: Theme.muted;
+                    font-size: 16px;
+                    font-weight: 600;
+                    width: 44px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    width: 84px;
+                    Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        height: 32px;
+                        border-radius: 16px;
+                        border-width: 1px;
+                        border-color: root.lyrics-open ? Theme.accent : Theme.muted;
+                        background: root.lyrics-open ? Theme.accent-dim : transparent;
+                        animate background { duration: 120ms; }
+                        Label {
+                            text: "Lyrics";
+                            color: root.lyrics-open ? Theme.accent : Theme.muted;
+                            font-size: 14px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    TouchArea {
+                        clicked => {
+                            root.sheet-open = false;
+                            root.toggle-lyrics();
+                        }
+                    }
+                }
+            }
             if root.up-next.length == 0: Label {
                 text: root.autoplay-busy ? "Finding songs\u{2026}" : "Nothing queued";
                 color: Theme.muted;

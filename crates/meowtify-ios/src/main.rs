@@ -9,6 +9,8 @@
 #[cfg(target_os = "ios")]
 mod native;
 #[cfg(target_os = "ios")]
+mod folder;
+#[cfg(target_os = "ios")]
 mod speech;
 
 #[cfg(target_os = "ios")]
@@ -50,7 +52,9 @@ mod app {
             .expect("tokio runtime");
 
         let settings = Settings::load();
-        let music = settings.library_dir.clone().or_else(documents_dir);
+        // A folder picked in the Files browser needs its access grant renewed on every launch.
+        let picked = crate::folder::restore(&config_dir());
+        let music = picked.or_else(|| settings.library_dir.clone()).or_else(documents_dir);
         let _ = std::fs::create_dir_all(config_dir());
         if let Some(dir) = &music {
             let _ = std::fs::create_dir_all(dir);
@@ -100,6 +104,7 @@ mod app {
             discord: None,
             autoplay: autoplay_control,
             open_links: Some(links_rx),
+            folder_picker: Some(Box::new(|done| crate::folder::pick(done))),
             dictation: Some(meowtify_ui::Dictation {
                 start: Box::new(|on_text| crate::speech::dictate(on_text)),
                 stop: Box::new(crate::speech::stop_dictation),
