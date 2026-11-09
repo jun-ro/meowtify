@@ -78,8 +78,10 @@ fn link_monitor() {
     #[link(name = "Network", kind = "framework")]
     extern "C" {}
 
+    // `dispatch_get_main_queue()` is an inline function in Apple's headers, so the linker has
+    // no symbol for it. What it returns is the address of this exported global.
     extern "C" {
-        fn dispatch_get_main_queue() -> *mut AnyObject;
+        static _dispatch_main_q: u8;
     }
 
     unsafe {
@@ -98,7 +100,8 @@ fn link_monitor() {
             meowtify_provider::set_metered(status == SATISFIED && uses(CELLULAR) && !uses(WIFI));
         });
         let _: () = msg_send![&*monitor, setPathUpdateHandler: &*block];
-        let _: () = msg_send![&*monitor, startWithQueue: dispatch_get_main_queue()];
+        let main_queue = std::ptr::addr_of!(_dispatch_main_q) as *mut AnyObject;
+        let _: () = msg_send![&*monitor, startWithQueue: main_queue];
         // The monitor holds the block and reports until the app ends.
         std::mem::forget(block);
         std::mem::forget(monitor);
