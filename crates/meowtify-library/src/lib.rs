@@ -291,6 +291,54 @@ impl Library {
     pub fn find(&self, uri: &str) -> Option<Track> {
         self.lookup.read().unwrap().by_uri.get(uri).cloned().or_else(|| self.extras.read().unwrap().map.get(uri).cloned())
     }
+
+    /// Downloads whose tags name no artist, with the provider id from the file name.
+    /// The app uses this once after start to re-read their details, because downloads made by
+    /// the in-process providers used to be saved without tags.
+    pub fn missing_artist_downloads(&self, limit: usize) -> Vec<(PathBuf, String)> {
+        let unknown = |t: &Track| {
+            t.artists.is_empty() || t.artists.iter().all(|a| a.name.trim().is_empty() || a.name.trim().eq_ignore_ascii_case("unknown artist"))
+        };
+        self.tracks()
+            .iter()
+            .filter(|t| unknown(t))
+            .filter_map(|t| {
+                let id = meowtify_core::youtube_id(&t.uri)?;
+                Some((PathBuf::from(t.uri.as_ref()), id.to_string()))
+            })
+            .take(limit)
+            .collect()
+    }
+
+    /// Downloads that are the low bitrate copy saved on a metered link, with the provider id
+    /// from the file name, so a better copy can replace them on an unmetered link.
+    pub fn low_quality_downloads(&self, limit: usize) -> Vec<(PathBuf, String)> {
+        self.tracks()
+            .iter()
+            .filter_map(|t| {
+                let path = PathBuf::from(t.uri.as_ref());
+                let id = meowtify_core::youtube_id(&t.uri)?;
+                meowtify_core::quality::marked(&path).then(|| (path, id.to_string()))
+            })
+            .take(limit)
+            .collect()
+    }
+
+    /// Reads one file's tags again after they changed, and puts it back in library order.
+    /// The path is kept, so playlists and the playing song still point at it. When the file
+    /// cannot be read (gone, or held open), the old entry stays instead of disappearing.
+    pub fn reload_file(&self, path: &std::path::Path) -> Option<Track> {
+        let uri = path.to_string_lossy().into_owned();
+        let before = self.find(&uri);
+        self.remove_file(&uri);
+        match self.add_file(path) {
+            Some(track) => Some(track),
+            None => {
+                let old = before?;
+                Some(self.insert_sorted(old))
+            }
+        }
+    }
 }
 
 fn page(items: &[Track], offset: u32, limit: u32) -> Page<Track> {
@@ -394,5 +442,52 @@ mod lookup_tests {
         assert_eq!(lib.playlist_tracks(&id).len(), 3);
         let (names, count) = lib.playlists().names(0, 10);
         assert_eq!((names.len(), count), (1, 1));
+    }
+
+    #[test]
+    fn downloads_without_an_artist_are_listed_for_repair() {
+        let lib = lib_with(&["Song [dQw4w9WgXcQ].m4a", "Known [aaaaaaaaaaa].m4a", "plain.mp3"]);
+        // `lib_with` names every artist "A"; the repair pass only takes the unknown ones.
+        assert!(lib.missing_artist_downloads(10).is_empty());
+        let lib = Library::new(None);
+        lib.add_streaming(std::path::Path::new("/m/Song [dQw4w9WgXcQ].m4a"), "Song", "Unknown artist", 1000);
+        lib.add_streaming(std::path::Path::new("/m/Known [aaaaaaaaaaa].m4a"), "Known", "Somebody", 1000);
+        lib.add_streaming(std::path::Path::new("/m/plain.mp3"), "Plain", "Unknown artist", 1000);
+        let missing = lib.missing_artist_downloads(10);
+        assert_eq!(missing.len(), 1, "only a download with no artist needs a lookup");
+        assert_eq!(missing[0].1, "dQw4w9WgXcQ");
+        assert!(lib.missing_artist_downloads(0).is_empty(), "the limit is respected");
+    }
+
+    #[test]
+    fn only_a_marked_low_bitrate_copy_is_upgraded() {
+        let dir = std::env::temp_dir().join(format!("meowtify-upgrade-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Song [dQw4w9WgXcQ].m4a");
+        std::fs::write(&path, b"audio").unwrap();
+        let lib = Library::new(None);
+        lib.add_streaming(&path, "Song", "A", 1000);
+        assert!(lib.low_quality_downloads(5).is_empty());
+        meowtify_core::quality::mark(&path);
+        let found = lib.low_quality_downloads(5);
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].0.as_path(), found[0].1.as_str()), (path.as_path(), "dQw4w9WgXcQ"));
+        meowtify_core::quality::unmark(&path);
+        assert!(lib.low_quality_downloads(5).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reloading_a_file_that_cannot_be_read_keeps_the_old_entry() {
+        let dir = std::env::temp_dir().join(format!("meowtify-reload-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Song [dQw4w9WgXcQ].m4a");
+        std::fs::write(&path, b"not audio").unwrap();
+        let lib = Library::new(None);
+        lib.add_streaming(&path, "Song", "A", 1000);
+        let track = lib.reload_file(&path).expect("the entry stays");
+        assert_eq!(track.artists[0].name.as_ref(), "A");
+        assert_eq!(lib.tracks().len(), 1, "a failed tag read loses nothing");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

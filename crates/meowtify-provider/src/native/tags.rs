@@ -31,6 +31,27 @@ pub(crate) fn tag(path: &Path, item: &Item) -> Result<()> {
         .map_err(|e| ProviderError::Io(format!("could not save tags: {e}")))
 }
 
+/// Tags a copy and moves it over the song, so a file the player still has open is never
+/// rewritten under it. Where the move is refused (Windows, a song that is playing), the
+/// copy is removed and the song stays untagged; the next scan can tag it again.
+pub(crate) async fn tag_copy(path: &Path, item: &Item) -> Result<()> {
+    let tmp = path.with_extension("tagging");
+    tokio::fs::copy(path, &tmp).await.map_err(|e| ProviderError::Io(e.to_string()))?;
+    let (source, item) = (tmp.clone(), item.clone());
+    let tagged = tokio::task::spawn_blocking(move || tag(&source, &item))
+        .await
+        .map_err(|e| ProviderError::Io(e.to_string()))?;
+    if let Err(e) = tagged {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(ProviderError::Io(format!("could not put the tags in place: {e}")));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,6 +72,28 @@ mod tests {
             thumbnail: None,
         };
         assert!(tag(&path, &item).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The copy the tags are written on never leaks into the music folder.
+    #[tokio::test]
+    async fn a_failed_tag_copy_leaves_no_file_behind() {
+        let dir = std::env::temp_dir().join(format!("meowtify-tags-copy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("not-a-song.m4a");
+        std::fs::write(&path, b"this is not an mp4").unwrap();
+        let item = Item {
+            provider: "youtube",
+            id: "abc".into(),
+            title: "T".into(),
+            artist: "A".into(),
+            duration_secs: None,
+            url: String::new(),
+            thumbnail: None,
+        };
+        assert!(tag_copy(&path, &item).await.is_err());
+        assert!(!path.with_extension("tagging").exists());
+        assert_eq!(std::fs::read(&path).unwrap(), b"this is not an mp4", "the song is untouched");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -4,7 +4,7 @@
 //! Cover images are YouTube thumbnails (see `thumbs`). Files with no known cover
 //! get a generated gradient.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -42,6 +42,8 @@ const ROW_H: f32 = 56.0;
 const PAGE: u32 = 50;
 /// Load the next page when the viewport bottom is this many rows from the end.
 const PREFETCH_ROWS: usize = 15;
+/// Downloads whose tags name no artist that are looked up again per launch, at most.
+const REPAIR_LIMIT: usize = 20;
 
 thread_local! {
     /// The browser lives on the UI thread. Worker results find it here.
@@ -56,6 +58,15 @@ thread_local! {
     /// The model behind the queue panel, the video id of each of its songs, and the covers
     /// that arrived (so a rebuilt panel does not load them again).
     static FOLDER_PICKER: RefCell<Option<Rc<dyn Fn(Box<dyn FnOnce(Option<std::path::PathBuf>) + Send>)>>> = const { RefCell::new(None) };
+    /// The native menu that will be shown when the current event ends (see `menu::native_menu`).
+    /// `ctx` clears it: some callers note a target and act at once, without wanting a menu.
+    pub(crate) static PENDING_MENU: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    /// Starts the short wait before the native menu is shown. Kept so the timer is not dropped.
+    pub(crate) static MENU_TIMER: slint::Timer = slint::Timer::default();
+    /// The platform's own image picker (iOS). `None` opens the desktop file dialog.
+    pub(crate) static COVER_PICKER: RefCell<Option<Rc<CoverPicker>>> = const { RefCell::new(None) };
+    /// The platform's own context menu (iOS). `None` means Slint draws its popup.
+    pub(crate) static NATIVE_MENU: RefCell<Option<Rc<NativeMenuPresenter>>> = const { RefCell::new(None) };
     static UP_NEXT_MODEL: RefCell<Option<Rc<VecModel<UpNext>>>> = const { RefCell::new(None) };
     static UP_NEXT_VIDS: RefCell<Vec<Option<String>>> = const { RefCell::new(Vec::new()) };
     /// Cover image loader. Its answers find the pages that wait for them here.
@@ -64,6 +75,22 @@ thread_local! {
     pub(crate) static THUMBS: RefCell<Option<Rc<thumbs::Thumbs>>> = const { RefCell::new(None) };
     /// Set once the slider has taken the player's volume.
     static VOLUME_SYNCED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// iOS: where the playing song's cover goes, for the lock screen. `None` takes it away.
+#[cfg(target_os = "ios")]
+type NowArtHook = Box<dyn Fn(Option<&[u8]>)>;
+
+#[cfg(target_os = "ios")]
+thread_local! {
+    /// Set by the iOS entry point before the UI starts.
+    static NOW_ART_HOOK: RefCell<Option<NowArtHook>> = const { RefCell::new(None) };
+}
+
+/// iOS: tells the app where to send the playing song's cover, for the lock screen.
+#[cfg(target_os = "ios")]
+pub fn set_now_art_hook(f: impl Fn(Option<&[u8]>) + 'static) {
+    NOW_ART_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
 }
 
 /// What the UI shows and uses.
@@ -87,6 +114,13 @@ pub struct Services {
     /// A folder picker that answers later (iOS shows its own browser). `None` uses the desktop's
     /// dialog. The function is given what to do with the folder, or `None` when cancelled.
     pub folder_picker: Option<FolderPicker>,
+    /// An image picker that answers later (iOS shows the photo library). `None` uses the desktop's
+    /// file dialog. The function is given what to do with the image: its path, a cancel, or why it
+    /// failed, so a pick that does not work can say so instead of doing nothing.
+    pub cover_picker: Option<CoverPicker>,
+    /// A context menu that the platform draws itself (iOS shows an action sheet). `None` lets
+    /// Slint draw its own popup. The function gets the rows and what to call with the chosen one.
+    pub native_menu: Option<NativeMenuPresenter>,
     /// The settings as read at startup. The window shows these and saves its own edits.
     pub settings: Settings,
 }
@@ -94,6 +128,36 @@ pub struct Services {
 /// Asks the platform for a music folder without waiting: `done` runs, on any thread, when the user
 /// has chosen or cancelled.
 pub type FolderPicker = Box<dyn Fn(Box<dyn FnOnce(Option<std::path::PathBuf>) + Send>)>;
+
+/// What an image picker that answers later came back with.
+pub enum CoverPick {
+    /// The chosen image, copied to a file the app may read.
+    Picked(std::path::PathBuf),
+    /// The user backed out: nothing to say.
+    Cancelled,
+    /// Something went wrong; the text says what, in words for the user.
+    Failed(String),
+}
+
+/// Asks the platform for an image without waiting: `done` runs, on any thread, when the user has
+/// chosen or cancelled.
+pub type CoverPicker = Box<dyn Fn(Box<dyn FnOnce(CoverPick) + Send>)>;
+
+/// One row of a context menu that the platform draws itself (iOS).
+#[derive(Clone)]
+pub struct NativeRow {
+    pub label: String,
+    /// What the row does, as `ctx` names it ("play", "next", "delete", …).
+    pub action: &'static str,
+    /// The extra `ctx` takes for this action (the playlist's place for "add").
+    pub arg: i32,
+    /// Drawn in red: deleting a song or playlist, removing it from one.
+    pub danger: bool,
+}
+
+/// Draws a menu with these rows and calls the function with the place of the one the user chose;
+/// the function runs on the UI thread. Nothing is called when the user dismisses the menu.
+pub type NativeMenuPresenter = Box<dyn Fn(Vec<NativeRow>, Box<dyn FnOnce(usize)>)>;
 
 /// Speech to text, supplied by the platform. `start` listens and calls the function it is given
 /// with the text heard so far and whether that text is final; it may call it from any thread.
@@ -109,7 +173,7 @@ pub fn run(
     mut events: broadcast::Receiver<Event>,
     rt: tokio::runtime::Handle,
 ) -> Result<(), slint::PlatformError> {
-    let Services { source, library, downloads, yt_dlp, discord, autoplay, open_links, dictation, folder_picker, settings } = services;
+    let Services { source, library, downloads, yt_dlp, discord, autoplay, open_links, dictation, folder_picker, cover_picker, native_menu, settings } = services;
     let win = MainWindow::new()?;
     win.set_touch(cfg!(target_os = "ios"));
     win.set_proxy(settings.proxy.as_str().into());
@@ -274,11 +338,29 @@ pub fn run(
             }
         });
     }
+    #[cfg(target_os = "ios")]
+    {
+        // The lock screen shows the same cover as the player, including when it arrives late.
+        let weak = win.as_weak();
+        thumbs.art_listener(move |id, bytes| {
+            let Some(w) = weak.upgrade() else { return };
+            if id.is_some_and(|id| w.get_now_vid().as_str() != id) {
+                return; // a cover for the song that just stopped
+            }
+            NOW_ART_HOOK.with(|h| {
+                if let Some(h) = h.borrow().as_ref() {
+                    h(bytes);
+                }
+            });
+        });
+    }
 
     let browser = Rc::new(Browser {
         win: win.as_weak(),
         source,
         library,
+        downloads: downloads.clone(),
+        maintenance: Cell::new(false),
         rt: rt.clone(),
         model,
         playlist_ids: RefCell::new(Vec::new()),
@@ -357,6 +439,14 @@ pub fn run(
             browser.toast("Disliked. Skipping, and fewer songs like this");
             send(Command::Next);
         });
+    }
+
+    // Platform hooks: iOS can pick an image and draw a context menu itself; the desktop does not.
+    if let Some(pick) = cover_picker {
+        COVER_PICKER.with(|p| *p.borrow_mut() = Some(Rc::from(pick)));
+    }
+    if let Some(show) = native_menu {
+        NATIVE_MENU.with(|p| *p.borrow_mut() = Some(Rc::from(show)));
     }
 
     if let Some(manager) = downloads {
@@ -579,7 +669,12 @@ pub fn run(
     }
     {
         let browser = browser.clone();
-        win.on_menu_opened(move |kind, idx| browser.capture_menu(kind, idx));
+        let send: Rc<dyn Fn(Command)> = Rc::new(send.clone());
+        win.on_menu_opened(move |kind, idx| {
+            browser.capture_menu(kind, idx);
+            // iOS draws an action sheet instead of the Slint popup (see `open-menu` in app.slint).
+            browser.native_menu(&send, kind, idx);
+        });
     }
     {
         let browser = browser.clone();
@@ -697,6 +792,10 @@ struct Browser {
     win: slint::Weak<MainWindow>,
     source: Arc<dyn MetadataSource>,
     library: Option<Arc<Library>>,
+    /// The download queue, for its provider (tag repair and quality upgrades).
+    downloads: Option<DownloadManager>,
+    /// Set once the background work after the first scan has started.
+    maintenance: Cell<bool>,
     rt: tokio::runtime::Handle,
     model: Rc<TrackModel>,
     playlist_ids: RefCell<Vec<Arc<str>>>,
@@ -779,6 +878,85 @@ impl Browser {
         get::GET.with(|g| {
             if let Some(g) = g.borrow().as_ref() {
                 g.library_ready();
+            }
+        });
+        self.start_maintenance();
+    }
+
+    /// Background work that starts once the library is listed: downloads saved without an
+    /// artist get it from the provider again, and low bitrate copies are replaced by the
+    /// better one while the link is not metered. Both keep the file path, so playlists and
+    /// the library index stay valid.
+    fn start_maintenance(self: &Rc<Self>) {
+        if self.maintenance.replace(true) {
+            return;
+        }
+        let (Some(library), Some(downloads)) = (self.library.clone(), self.downloads.clone()) else { return };
+        let provider = downloads.provider().clone();
+        self.rt.spawn(async move {
+            let mut fixed = false;
+            let playing = playing_uri();
+            for (path, id) in library.missing_artist_downloads(REPAIR_LIMIT) {
+                // Writing tags rewrites the file; never do that under the player.
+                if playing.as_deref() == Some(path.to_string_lossy().as_ref()) {
+                    continue;
+                }
+                let url = format!("https://www.youtube.com/watch?v={id}");
+                let Ok(items) = provider.resolve(&url).await else { continue };
+                let Some(item) = items.into_iter().find(|i| i.id == id) else { continue };
+                if item.artist.trim().is_empty() || provider.finish(&item, &path).await.is_err() {
+                    continue;
+                }
+                // Reading the tags again is disk work: do it here, not on the UI thread.
+                let (l, p) = (library.clone(), path.clone());
+                let refreshed = tokio::task::spawn_blocking(move || l.reload_file(&p)).await.ok().flatten();
+                let named = refreshed.is_some_and(|t| {
+                    t.artists.iter().any(|a| {
+                        let name = a.name.trim();
+                        !name.is_empty() && !name.eq_ignore_ascii_case("unknown artist")
+                    })
+                });
+                fixed |= named;
+            }
+            if fixed {
+                refresh_library();
+            }
+
+            let mut failed: std::collections::HashSet<String> = std::collections::HashSet::new();
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                // Only when the user asked for it and the link is no longer metered, and
+                // never while a download the user started is running.
+                if !meowtify_provider::low_bitrate() || meowtify_provider::metered() || !downloads.is_idle() {
+                    continue;
+                }
+                let mut changed = false;
+                let mut done = 0;
+                for (path, id) in library.low_quality_downloads(8) {
+                    if done >= 2 {
+                        break;
+                    }
+                    // A file that cannot be replaced now (a song the player still holds)
+                    // is left alone until the next launch, rather than fetched every minute.
+                    if failed.contains(&id) {
+                        continue;
+                    }
+                    match provider.upgrade(&path, &id, Arc::new(|_| {})).await {
+                        Ok(Some(_)) => {
+                            let (l, p) = (library.clone(), path.clone());
+                            let _ = tokio::task::spawn_blocking(move || l.reload_file(&p)).await;
+                            changed = true;
+                            done += 1;
+                        }
+                        Ok(None) => done += 1,
+                        Err(_) => {
+                            failed.insert(id);
+                        }
+                    }
+                }
+                if changed {
+                    refresh_library();
+                }
             }
         });
     }
@@ -926,6 +1104,35 @@ fn update_settings(weak: &slint::Weak<MainWindow>, change: impl FnOnce(&mut Sett
             w.set_status(format!("could not save settings: {e}").into());
         }
     }
+}
+
+/// Redraws the list after a file's tags changed on a background thread.
+fn refresh_library() {
+    let _ = slint::invoke_from_event_loop(|| {
+        BROWSER.with(|b| {
+            if let Some(b) = b.borrow().as_ref() {
+                b.library_changed();
+            }
+        });
+    });
+}
+
+/// The file the player has open, asked of the UI thread. `None` when that does not answer
+/// in time, in which case a tag write still goes ahead.
+fn playing_uri() -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let sent = slint::invoke_from_event_loop(move || {
+        let uri = BROWSER.with(|b| {
+            b.borrow()
+                .as_ref()
+                .and_then(|b| b.win.upgrade())
+                .map(|w| w.get_now_uri().to_string())
+                .filter(|u| !u.is_empty())
+        });
+        let _ = tx.send(uri);
+    });
+    sent.ok()?;
+    rx.recv_timeout(Duration::from_millis(500)).ok().flatten()
 }
 
 /// Songs shown in the queue panel at most.
@@ -1129,10 +1336,23 @@ fn set_now_art(w: &MainWindow, t: &Track) {
         Some(v) => {
             w.set_now_vid(v.as_str().into());
             w.set_now_art(cover_of(&v));
+            // The lock screen shows the same cover; its bytes come from the same fetch.
+            #[cfg(target_os = "ios")]
+            THUMBS.with(|th| {
+                if let Some(th) = th.borrow().as_ref() {
+                    th.art(&v, &meowtify_core::youtube_thumbnail(&v));
+                }
+            });
         }
         None => {
             w.set_now_vid(SharedString::default());
             w.set_now_art(Image::from_rgba8(make_art(art_id(t))));
+            #[cfg(target_os = "ios")]
+            THUMBS.with(|th| {
+                if let Some(th) = th.borrow().as_ref() {
+                    th.clear_art();
+                }
+            });
         }
     }
 }

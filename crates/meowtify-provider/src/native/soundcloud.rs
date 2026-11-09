@@ -331,19 +331,18 @@ impl Provider for NativeSoundCloud {
         if !self.tagging {
             return Ok(());
         }
-        let path = path.to_path_buf();
-        let item = item.clone();
-        tokio::task::spawn_blocking(move || crate::native::tags::tag(&path, &item))
-            .await
-            .map_err(|e| ProviderError::Io(e.to_string()))?
+        crate::native::tags::tag_copy(path, item).await
     }
 
     async fn download(&self, item: &Item, dest_dir: &Path, progress: ProgressFn) -> Result<PathBuf> {
         std::fs::create_dir_all(dest_dir).map_err(|e| ProviderError::Io(e.to_string()))?;
-        match self.choose(&item.id).await? {
-            Chosen { url, hls: false, ext } => self.save_progressive(item, &url, ext, dest_dir, progress).await,
-            Chosen { url, hls: true, .. } => self.save_hls(item, &url, dest_dir, progress).await,
-        }
+        let path = match self.choose(&item.id).await? {
+            Chosen { url, hls: false, ext } => self.save_progressive(item, &url, ext, dest_dir, progress).await?,
+            Chosen { url, hls: true, .. } => self.save_hls(item, &url, dest_dir, progress).await?,
+        };
+        // Title and artist, so the library lists the artist instead of "Unknown artist".
+        let _ = self.finish(item, &path).await;
+        Ok(path)
     }
 }
 

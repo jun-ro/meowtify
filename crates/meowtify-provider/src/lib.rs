@@ -6,6 +6,7 @@
 //! reports progress.
 
 mod audius;
+mod link;
 mod lyrics;
 mod manager;
 mod native;
@@ -27,6 +28,7 @@ pub use recommend::{
     main_artist, normalize, pick_match, resolve, song_key, variants, valid_lastfm_key, Candidate, DeezerRadio, LastFmSimilar, Recommender, Seed, YtMusicRadio,
 };
 pub use net::{proxy, set_proxy, validate_proxy};
+pub use link::{low_bitrate, metered, save_data, set_low_bitrate, set_metered};
 pub use manager::{DownloadManager, Job, JobState, DEFAULT_PARALLEL};
 pub use audius::Audius;
 #[cfg(any(target_os = "ios", feature = "native-extract"))]
@@ -115,6 +117,14 @@ pub trait Provider: Send + Sync {
     /// is reading it (a song that is playing keeps it open). The default does nothing.
     async fn finish(&self, _item: &Item, _path: &Path) -> Result<()> {
         Ok(())
+    }
+
+    /// Replaces a low bitrate copy saved on a metered link with the best quality one, once
+    /// the link is unmetered. `path` is the file in the library and `id` the provider id in
+    /// its name. Returns the path when the file was replaced, `None` when there is nothing
+    /// to do. The default does nothing.
+    async fn upgrade(&self, _path: &Path, _id: &str, _progress: ProgressFn) -> Result<Option<PathBuf>> {
+        Ok(None)
     }
 
     /// Does the slow lookup for `item` ahead of time, so a later `download` starts at

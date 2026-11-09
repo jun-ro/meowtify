@@ -3214,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "meowtify-autoplay",
@@ -3231,7 +3231,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-autoplay"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "meowtify-core",
  "meowtify-library",
@@ -3251,7 +3251,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-cli"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "meowtify-library",
  "meowtify-provider",
@@ -3261,7 +3261,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "tokio",
@@ -3269,7 +3269,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-discord"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "meowtify-core",
  "serde_json",
@@ -3278,7 +3278,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-ios"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "block2 0.6.2",
  "meowtify-autoplay",
@@ -3289,6 +3289,7 @@ dependencies = [
  "meowtify-ui",
  "objc2 0.6.5",
  "objc2-avf-audio",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
  "objc2-media-player",
  "objc2-speech",
@@ -3309,7 +3310,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-jam-net"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3343,7 +3344,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-library"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "lofty",
@@ -3354,7 +3355,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-player"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "meowtify-core",
@@ -3365,7 +3366,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-plugin"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -3375,7 +3376,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-plugin-compile"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "meowtify-plugin",
  "wasmtime",
@@ -3383,7 +3384,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-plugin-tests"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "meowtify-plugin",
  "wasmtime",
@@ -3391,7 +3392,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-provider"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "lofty",
@@ -3407,7 +3408,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-ui"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "getrandom 0.3.4",
  "gif",
@@ -3427,7 +3428,7 @@ dependencies = [
 
 [[package]]
 name = "meowtify-ui-view"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "slint",
  "slint-build",

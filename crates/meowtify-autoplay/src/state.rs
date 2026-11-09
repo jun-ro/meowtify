@@ -23,8 +23,11 @@ const REFILL_GAP: usize = 2;
 const SKIP_MS: u32 = 15_000;
 /// A pool of suggestions is used for this long before the service is asked again.
 const POOL_LIFE: Duration = Duration::from_secs(30 * 60);
-/// Wait after a search that found nothing (no network, a service is down).
-const BACKOFF: Duration = Duration::from_secs(30);
+/// Wait after a search that found nothing (no network, a service is down). It starts short,
+/// because most misses are brief hiccups, and doubles with each miss in a row up to [`BACKOFF_MAX`].
+const BACKOFF_MIN: Duration = Duration::from_secs(5);
+/// The longest wait after repeated misses.
+const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// Wait after songs were added, so the queue event that follows does not start another search.
 const SETTLE: Duration = Duration::from_secs(2);
 const HISTORY: usize = 300;
@@ -139,6 +142,8 @@ pub struct State {
     disliked_order: VecDeque<String>,
     pool: Option<(String, Vec<Ranked>, Instant)>,
     cool_until: Option<Instant>,
+    /// Searches in a row that found nothing; sets the length of the next wait.
+    misses: u32,
     taste: Taste,
     cur: Option<Current>,
     /// The key of the song played before the current one.
@@ -171,6 +176,7 @@ impl State {
             disliked_order: VecDeque::new(),
             pool: None,
             cool_until: None,
+            misses: 0,
             taste,
             cur: None,
             prior: None,
@@ -439,7 +445,10 @@ impl State {
             self.remember(a.key.clone(), a.artist.clone());
         }
         self.pool = (!d.pool.is_empty()).then(|| (d.seed_key, d.pool, now));
-        self.cool_until = Some(now + if found { SETTLE } else { BACKOFF });
+        self.cool_until = Some(now + if found { SETTLE } else { self.miss() });
+        if found {
+            self.misses = 0;
+        }
         found && self.ended
     }
 
@@ -456,7 +465,14 @@ impl State {
 
     /// The search could not run to its end (the task failed).
     pub fn failed(&mut self, now: Instant) {
-        self.cool_until = Some(now + BACKOFF);
+        self.cool_until = Some(now + self.miss());
+    }
+
+    /// Counts one more miss in a row and returns how long to wait before the next search.
+    fn miss(&mut self) -> Duration {
+        let wait = BACKOFF_MIN.saturating_mul(1u32 << self.misses.min(4)).min(BACKOFF_MAX);
+        self.misses = self.misses.saturating_add(1);
+        wait
     }
 
 }
@@ -567,10 +583,25 @@ mod tests {
         assert!(s.queue(&queue(&a, &[]), true, true, now).is_none(), "a search runs");
         assert!(s.queue(&Queue::default(), true, false, now).is_none(), "nothing plays");
         s.done(FillDone { seed_key: "k".into(), pool: Vec::new(), added: Vec::new() }, now);
-        assert!(s.queue(&queue(&a, &[]), true, false, now + Duration::from_secs(5)).is_none(), "backing off");
-        assert!(s.queue(&queue(&a, &[]), true, false, now + Duration::from_secs(31)).is_some());
+        assert!(s.queue(&queue(&a, &[]), true, false, now + Duration::from_secs(3)).is_none(), "backing off");
+        assert!(s.queue(&queue(&a, &[]), true, false, now + Duration::from_secs(6)).is_some(), "first miss waits 5 s");
         s.playback(Some(&pb(&a, true, 2000, Repeat::Track)));
         assert!(s.queue(&queue(&a, &[]), true, false, now + Duration::from_secs(60)).is_none(), "repeat is on");
+    }
+
+    #[test]
+    fn misses_in_a_row_wait_longer_and_a_hit_resets_the_wait() {
+        let mut s = state();
+        let now = Instant::now();
+        let a = track("a", "Song A", "Band", 200);
+        s.playback(Some(&pb(&a, true, 1000, Repeat::Off)));
+        let empty = || FillDone { seed_key: "k".into(), pool: Vec::new(), added: Vec::new() };
+        // Misses wait 5 s, 10 s, 20 s, then 30 s at most.
+        for (n, wait) in [5u64, 10, 20, 30, 30].into_iter().enumerate() {
+            s.done(empty(), now);
+            assert!(s.queue(&queue(&a, &[]), true, false, now + Duration::from_secs(wait - 1)).is_none(), "miss {n} still waits");
+            assert!(s.queue(&queue(&a, &[]), true, false, now + Duration::from_secs(wait + 1)).is_some(), "miss {n} waits {wait} s");
+        }
     }
 
     #[test]

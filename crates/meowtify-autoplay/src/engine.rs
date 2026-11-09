@@ -42,8 +42,13 @@ const MAX_FAILURES: usize = 8;
 const WINDOW: usize = 4;
 /// How many suggestions get their stream link looked up while the other lists are still coming.
 const WARM: usize = 2;
-/// The longest a search for suggestions waits for the slowest service.
-const GATHER_CAP: Duration = Duration::from_secs(5);
+/// The longest a search for suggestions waits for the slowest service. A slow answer only
+/// costs this much when no service has answered yet; otherwise [`GATHER_GRACE`] applies.
+const GATHER_CAP: Duration = Duration::from_secs(8);
+/// The same limit for the second try, which runs when the first found nothing.
+const GATHER_RETRY_CAP: Duration = Duration::from_secs(12);
+/// The pause before that second try, so a brief network or service hiccup can pass.
+const GATHER_RETRY_DELAY: Duration = Duration::from_millis(1500);
 /// How long the other services get after the first one answered.
 const GATHER_GRACE: Duration = Duration::from_millis(1500);
 
@@ -375,7 +380,7 @@ async fn fill(env: Arc<Env>, mut job: FillJob, generation: u64, mut plan: watch:
     let (mut pool, _warm): (Vec<Ranked>, Vec<AbortOnDrop<()>>) = match job.pool.take() {
         Some(p) if !p.is_empty() => (p, Vec::new()),
         _ => tokio::select! {
-            g = gather(&env, &job) => g,
+            g = gather_retry(&env, &job) => g,
             _ = wait_stale(&mut plan, generation) => return nothing(&job),
         },
     };
@@ -429,7 +434,21 @@ async fn fill(env: Arc<Env>, mut job: FillJob, generation: u64, mut plan: watch:
 /// Asks every recommender at once and merges the answers with the songs this listener played
 /// after the seed. It does not wait for a slow service: once one answers, the others get
 /// [`GATHER_GRACE`] more, and the whole search is capped at [`GATHER_CAP`].
-async fn gather(env: &Env, job: &FillJob) -> (Vec<Ranked>, Vec<AbortOnDrop<()>>) {
+async fn gather_retry(env: &Env, job: &FillJob) -> (Vec<Ranked>, Vec<AbortOnDrop<()>>) {
+    let first = gather(env, job, GATHER_CAP).await;
+    if !first.0.is_empty() {
+        return first;
+    }
+    eprintln!("autoplay: no suggestions for {:?}, trying once more", job.seed_key);
+    tokio::time::sleep(GATHER_RETRY_DELAY).await;
+    let second = gather(env, job, GATHER_RETRY_CAP).await;
+    if second.0.is_empty() {
+        eprintln!("autoplay: still no suggestions for {:?}", job.seed_key);
+    }
+    second
+}
+
+async fn gather(env: &Env, job: &FillJob, cap: Duration) -> (Vec<Ranked>, Vec<AbortOnDrop<()>>) {
     let mut recommenders: Vec<Arc<dyn Recommender>> = vec![Arc::new(YtMusicRadio), Arc::new(DeezerRadio)];
     let key = env.control.lastfm_key();
     if valid_lastfm_key(&key) {
@@ -443,7 +462,17 @@ async fn gather(env: &Env, job: &FillJob) -> (Vec<Ranked>, Vec<AbortOnDrop<()>>)
     for r in recommenders {
         let (seed, tx) = (job.seed.clone(), tx.clone());
         asking.push(AbortOnDrop::spawn(async move {
-            let list = tokio::time::timeout(RECOMMEND_TIMEOUT, r.similar(&seed)).await.ok().and_then(|r| r.ok()).unwrap_or_default();
+            let list = match tokio::time::timeout(RECOMMEND_TIMEOUT, r.similar(&seed)).await {
+                Ok(Ok(list)) => list,
+                Ok(Err(e)) => {
+                    eprintln!("autoplay: {} failed: {e}", r.name());
+                    Vec::new()
+                }
+                Err(_) => {
+                    eprintln!("autoplay: {} timed out", r.name());
+                    Vec::new()
+                }
+            };
             let _ = tx.send(list);
         }));
     }
@@ -452,7 +481,7 @@ async fn gather(env: &Env, job: &FillJob) -> (Vec<Ranked>, Vec<AbortOnDrop<()>>)
     if !job.history.is_empty() {
         lists.push(job.history.clone());
     }
-    let hard = tokio::time::Instant::now() + GATHER_CAP;
+    let hard = tokio::time::Instant::now() + cap;
     let mut deadline = hard;
     let mut answered = 0;
     let mut warmed = false;
@@ -522,7 +551,10 @@ async fn from_main(env: &Env, cand: &Candidate) -> Option<(String, Item)> {
         return Some((t.uri.to_string(), item));
     }
     let path = match cached(&env.cache, &item.id) {
-        Some(p) => p,
+        Some(p) => {
+            touch(&p);
+            p
+        }
         None => {
             std::fs::create_dir_all(&env.cache).ok()?;
             let progress: meowtify_provider::ProgressFn = Arc::new(|_| {});
@@ -545,7 +577,10 @@ async fn from_fallback(env: &Env, provider: &Arc<dyn Provider>, cand: &Candidate
         return None;
     }
     let path = match cached(&env.cache, &item.id) {
-        Some(p) => p,
+        Some(p) => {
+            touch(&p);
+            p
+        }
         None => {
             std::fs::create_dir_all(&env.cache).ok()?;
             let progress: meowtify_provider::ProgressFn = Arc::new(|_| {});
@@ -559,6 +594,15 @@ async fn from_fallback(env: &Env, provider: &Arc<dyn Provider>, cand: &Candidate
 fn register(env: &Env, path: &Path, item: &Item, cand: &Candidate) -> String {
     let secs = item.duration_secs.or(cand.duration_secs).unwrap_or(0);
     env.library.add_transient(path, &item.title, &item.artist, secs.saturating_mul(1000)).uri.to_string()
+}
+
+/// Marks a reused cache file as new. The sweep deletes unprotected files older than
+/// [`ORPHAN_AGE`], and a file that is queued before the sweep's list of protected paths knows it
+/// (the queue event has not arrived yet) must not look old, or it is deleted while queued.
+fn touch(path: &Path) {
+    if let Ok(f) = std::fs::File::options().write(true).open(path) {
+        let _ = f.set_modified(SystemTime::now());
+    }
 }
 
 /// A finished file of the cache for a video id.
@@ -618,6 +662,16 @@ mod tests {
         let removed = sweep(&d, &protect);
         assert_eq!(removed, vec![orphan.to_string_lossy().into_owned()]);
         assert!(!orphan.exists() && playing.exists() && fresh.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_reused_file_that_is_touched_survives_the_sweep() {
+        let d = temp("touch");
+        let reused = write(&d, "reused [eeeeeeeeeee].m4a", 100, 7200);
+        touch(&reused);
+        let removed = sweep(&d, &HashSet::new());
+        assert!(removed.is_empty() && reused.exists(), "a file queued a moment ago looked old");
         let _ = std::fs::remove_dir_all(&d);
     }
 

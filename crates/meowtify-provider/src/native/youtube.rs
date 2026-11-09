@@ -129,6 +129,8 @@ struct Resolved {
     artist: String,
     duration_secs: Option<u32>,
     thumbnail: Option<String>,
+    /// The link is the low bitrate copy, saved because the link is metered.
+    low: bool,
 }
 
 struct Stream {
@@ -280,8 +282,9 @@ impl NativeYouTube {
             self.remember_visitor(&answer).await;
             let status = answer.pointer("/playabilityStatus/status").and_then(Value::as_str).unwrap_or("");
             if status == "OK" {
+                let low = crate::link::save_data();
                 let formats = answer.pointer("/streamingData/adaptiveFormats").and_then(Value::as_array);
-                if let Some((url, size)) = formats.and_then(|f| pick_audio(f)) {
+                if let Some((url, size)) = formats.and_then(|f| pick_audio(f, low)) {
                     let details = answer.get("videoDetails");
                     let title = details.and_then(|d| d.get("title")).and_then(Value::as_str).unwrap_or(id).to_string();
                     let artist = details.and_then(|d| d.get("author")).and_then(Value::as_str).unwrap_or("").to_string();
@@ -303,6 +306,7 @@ impl NativeYouTube {
                         artist,
                         duration_secs,
                         thumbnail,
+                        low,
                     }));
                 }
                 last = "YouTube sent no AAC audio for this song".into();
@@ -328,7 +332,8 @@ impl NativeYouTube {
     }
 
     async fn resolved(&self, id: &str) -> Result<Arc<Resolved>> {
-        if let Some(found) = self.cache.get(id) {
+        let low = crate::link::save_data();
+        if let Some(found) = self.cache.get(id).filter(|r| r.low == low) {
             return Ok(found);
         }
         let found = self.resolve(id).await?;
@@ -502,8 +507,9 @@ impl Drop for Growing {
 }
 
 /// The best decodable audio format: MP4/AAC first, then MP3. Opus in WebM is left out
-/// because the player cannot decode it.
-fn pick_audio(formats: &[Value]) -> Option<(String, Option<u64>)> {
+/// because the player cannot decode it. `low` asks for the smallest usable AAC instead,
+/// for a download on a metered link.
+fn pick_audio(formats: &[Value], low: bool) -> Option<(String, Option<u64>)> {
     let mut best: Option<(i64, &Value)> = None;
     for format in formats {
         let Some(url) = format.get("url").and_then(Value::as_str).filter(|u| u.starts_with("https://")) else { continue };
@@ -519,7 +525,14 @@ fn pick_audio(formats: &[Value]) -> Option<(String, Option<u64>)> {
         } else {
             continue;
         };
-        let score = base + if itag == 140 { 10 } else { 0 } + format.get("bitrate").and_then(Value::as_i64).unwrap_or(0) / 1000;
+        let bitrate = format.get("bitrate").and_then(Value::as_i64).unwrap_or(0);
+        // AAC stays ahead of MP3 in both modes; the rest picks the largest or the smallest.
+        let score = base * 1_000
+            + if low {
+                -bitrate.min(500_000)
+            } else {
+                (if itag == 140 { 10_000 } else { 0 }) + bitrate.min(9_999)
+            };
         if best.is_none_or(|(s, _)| score > s) {
             best = Some((score, format));
         }
@@ -763,7 +776,14 @@ impl Provider for NativeYouTube {
         let found = self.resolved(&item.id).await?;
         let path = Self::media_path(item, dest_dir);
         match self.fetch_stream(&found, &path, progress, Some(&ready)).await {
-            Ok(_) => Ok(path),
+            Ok(_) => {
+                if found.low {
+                    meowtify_core::quality::mark(&path);
+                } else {
+                    meowtify_core::quality::unmark(&path);
+                }
+                Ok(path)
+            }
             Err(e) => {
                 self.cache.forget(&item.id);
                 Err(e)
@@ -775,11 +795,7 @@ impl Provider for NativeYouTube {
         if !self.tagging {
             return Ok(());
         }
-        let path = path.to_path_buf();
-        let item = item.clone();
-        tokio::task::spawn_blocking(move || crate::native::tags::tag(&path, &item))
-            .await
-            .map_err(|e| ProviderError::Io(e.to_string()))?
+        crate::native::tags::tag_copy(path, item).await
     }
 
     async fn download(&self, item: &Item, dest_dir: &Path, progress: ProgressFn) -> Result<PathBuf> {
@@ -809,8 +825,56 @@ impl Provider for NativeYouTube {
         }
         std::fs::rename(&part, &path).map_err(|e| ProviderError::Io(e.to_string()))?;
         guard.keep();
+        // Title and artist, so the library lists the artist instead of "Unknown artist".
+        // A failure keeps the song: only its tags are missing, and a later scan can add them.
+        let _ = self.finish(item, &path).await;
+        if found.low {
+            meowtify_core::quality::mark(&path);
+        } else {
+            meowtify_core::quality::unmark(&path);
+        }
         progress(100.0);
         Ok(path)
+    }
+
+    /// Replaces the low bitrate copy at `path` with the best one, now that the link is no
+    /// longer metered. The file keeps its name, so playlists and the library still know it.
+    async fn upgrade(&self, path: &Path, id: &str, progress: ProgressFn) -> Result<Option<PathBuf>> {
+        // Without tags, a replacement would lose the artist the old copy carries.
+        if !self.tagging || !meowtify_core::quality::marked(path) {
+            return Ok(None);
+        }
+        let found = self.resolved(id).await?;
+        if found.low {
+            return Ok(None); // still metered: nothing better can be fetched
+        }
+        let old = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        if found.stream.size.is_some_and(|size| size <= old) {
+            meowtify_core::quality::unmark(path);
+            return Ok(None);
+        }
+        let part = path.with_extension("meowtify-part");
+        let guard = fetch::PartFile::new(part.clone());
+        let headers = [("User-Agent", found.stream.user_agent.as_str()), ("Accept", "*/*")];
+        fetch::download_ranged(&found.stream.url, &headers, &part, found.stream.size, progress.clone()).await?;
+        let item = Item {
+            provider: "youtube",
+            id: id.to_string(),
+            title: found.title.clone(),
+            artist: found.artist.clone(),
+            duration_secs: found.duration_secs,
+            url: format!("https://www.youtube.com/watch?v={id}"),
+            thumbnail: found.thumbnail.clone(),
+        };
+        let (tag_path, tag_item) = (part.clone(), item);
+        tokio::task::spawn_blocking(move || crate::native::tags::tag(&tag_path, &tag_item))
+            .await
+            .map_err(|e| ProviderError::Io(e.to_string()))??;
+        std::fs::rename(&part, path).map_err(|e| ProviderError::Io(e.to_string()))?;
+        guard.keep();
+        meowtify_core::quality::unmark(path);
+        progress(100.0);
+        Ok(Some(path.to_path_buf()))
     }
 }
 
@@ -825,9 +889,11 @@ mod tests {
             { "itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "url": "https://x/a.m4a", "contentLength": "4250167", "bitrate": 129000 },
             { "itag": 139, "mimeType": "audio/mp4; codecs=\"mp4a.40.5\"", "url": "https://x/b.m4a", "bitrate": 48000 }
         ]);
-        let (url, size) = pick_audio(formats.as_array().unwrap()).unwrap();
+        let (url, size) = pick_audio(formats.as_array().unwrap(), false).unwrap();
         assert_eq!(url, "https://x/a.m4a");
         assert_eq!(size, Some(4_250_167));
+        // On a metered link the small copy is taken, still AAC.
+        assert_eq!(pick_audio(formats.as_array().unwrap(), true).unwrap().0, "https://x/b.m4a");
     }
 
     #[test]
@@ -836,8 +902,9 @@ mod tests {
             { "itag": 140, "mimeType": "audio/mp4", "url": "http://x/a.m4a" },
             { "itag": 140, "mimeType": "audio/mp4", "url": "https://x/a.m4a" }
         ]);
-        assert_eq!(pick_audio(formats.as_array().unwrap()).unwrap().0, "https://x/a.m4a");
-        assert!(pick_audio(&[]).is_none());
+        assert_eq!(pick_audio(formats.as_array().unwrap(), false).unwrap().0, "https://x/a.m4a");
+        assert!(pick_audio(&[], false).is_none());
+        assert!(pick_audio(&[], true).is_none());
     }
 
     #[test]

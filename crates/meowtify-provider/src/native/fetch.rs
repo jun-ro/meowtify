@@ -5,16 +5,26 @@
 //! job never leaves a half song in the library.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
 use crate::native::http;
 use crate::{ProviderError, ProgressFn, Result};
 
-/// Bytes per range request. YouTube throttles or refuses very large single requests;
-/// yt-dlp uses 10 MiB, and 9 MiB keeps each request under a minute on a slow link.
+/// Bytes per range request while a file is streamed. YouTube refuses very large single
+/// requests; yt-dlp uses 10 MiB, and 9 MiB keeps each request under a minute on a slow link.
 pub(crate) const CHUNK: u64 = 9 * 1024 * 1024;
+
+/// Bytes per range request when a whole song is saved. YouTube gives a fast burst and then
+/// throttles a long range to a fraction of the link, so a song is split into small ranges.
+const PIECE: u64 = 1024 * 1024;
+
+/// Range requests in flight at once. Each one holds a 64 KiB read buffer and one
+/// connection, so this is the whole cost in memory (plus TLS state).
+const PARALLEL: usize = 4;
 
 /// A read that takes longer than this means the connection is dead.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
@@ -68,43 +78,87 @@ pub(crate) fn parse_content_range(value: &str) -> Option<(u64, u64, Option<u64>)
     Some((first, last, total))
 }
 
-/// Downloads `url` with byte ranges, appending to `part`. Returns the file size.
-///
-/// `total_hint` is the size the API stated; the server's `Content-Range` replaces it.
-/// Progress is a percentage of the real length, and stays under 100 until the rename.
-pub(crate) async fn download_ranged(
-    url: &str,
-    headers: &[(&str, &str)],
-    part: &Path,
-    total_hint: Option<u64>,
+/// Bytes written so far, shared by the pieces of one download, and the progress report.
+struct Feed {
+    written: AtomicU64,
+    total: AtomicU64,
     progress: ProgressFn,
-) -> Result<u64> {
-    let mut file = tokio::fs::File::create(part).await.map_err(|e| ProviderError::Io(e.to_string()))?;
-    let mut offset = 0u64;
-    let mut total = total_hint.filter(|t| *t > 0);
-    let mut buf = vec![0u8; 64 * 1024];
+}
 
-    loop {
-        if total.is_some_and(|t| offset >= t) {
-            break;
+impl Feed {
+    fn add(&self, n: u64) {
+        let done = self.written.fetch_add(n, Ordering::Relaxed) + n;
+        let total = self.total.load(Ordering::Relaxed);
+        if total > 0 {
+            (self.progress)((done as f64 / total as f64 * 100.0).min(99.0) as f32);
         }
-        let want = chunk_len(offset, total);
-        let mut reply = http::get_range(url, offset, want, headers).await?;
+    }
+}
+
+/// What one range request brought back.
+struct Piece {
+    /// The size the server stated for the whole file, when it did.
+    total: Option<u64>,
+    /// The server ignored the range and sent the file from byte 0.
+    whole: bool,
+    /// Bytes written to the part file.
+    got: u64,
+}
+
+/// A media URL and the headers it needs, for a piece fetched on another task.
+#[derive(Clone)]
+struct Ranged {
+    url: String,
+    headers: Vec<(String, String)>,
+}
+
+impl Ranged {
+    fn new(url: &str, headers: &[(&str, &str)]) -> Ranged {
+        Ranged {
+            url: url.to_string(),
+            headers: headers.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect(),
+        }
+    }
+
+    /// Fetches `want` bytes at `offset`, overwriting that span of `part`.
+    ///
+    /// A broken connection is tried once more: the span is written from its start again,
+    /// so a half-saved piece cannot leave a hole.
+    async fn piece(&self, part: &Path, offset: u64, want: u64, feed: &Feed) -> Result<Piece> {
+        match self.piece_once(part, offset, want, feed).await {
+            Ok(piece) => Ok(piece),
+            Err(e) if http::transient(&e) => {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                self.piece_once(part, offset, want, feed).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn piece_once(&self, part: &Path, offset: u64, want: u64, feed: &Feed) -> Result<Piece> {
+        let headers: Vec<(&str, &str)> = self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let mut reply = http::get_range(&self.url, offset, want, &headers).await?;
         let whole = match reply.status {
             206 => false,
             200 if offset == 0 => true,
-            416 if offset > 0 => break,
+            416 if offset > 0 => return Ok(Piece { total: None, whole: false, got: 0 }),
             status => return Err(ProviderError::Tool(format!("the audio server answered {status}"))),
         };
+        let mut total = None;
         if let Some(range) = reply.header("content-range").and_then(parse_content_range) {
             if range.0 != offset {
                 return Err(ProviderError::Tool(format!("the server sent bytes from {}, not {offset}", range.0)));
             }
-            if let Some(t) = range.2 {
-                total = Some(t);
-            }
+            total = range.2.filter(|t| *t > 0);
         }
 
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(part)
+            .await
+            .map_err(|e| ProviderError::Io(e.to_string()))?;
+        file.seek(std::io::SeekFrom::Start(offset)).await.map_err(|e| ProviderError::Io(e.to_string()))?;
+        let mut buf = vec![0u8; 64 * 1024];
         let mut got = 0u64;
         loop {
             let n = match tokio::time::timeout(READ_TIMEOUT, reply.read(&mut buf)).await {
@@ -116,29 +170,109 @@ pub(crate) async fn download_ranged(
             }
             file.write_all(&buf[..n]).await.map_err(|e| ProviderError::Io(e.to_string()))?;
             got += n as u64;
-            offset += n as u64;
-            if let Some(t) = total {
-                if t > 0 {
-                    progress((offset as f64 / t as f64 * 100.0).min(99.0) as f32);
-                }
-            }
+            feed.add(n as u64);
             if !whole && got >= want {
                 break;
             }
         }
         file.flush().await.map_err(|e| ProviderError::Io(e.to_string()))?;
-        if got == 0 {
-            break;
+        Ok(Piece { total, whole, got })
+    }
+}
+
+/// Downloads `url` with byte ranges, writing to `part`. Returns the file size.
+///
+/// `total_hint` is the size the API stated; the server's `Content-Range` replaces it.
+/// Progress is a percentage of the real length, and stays under 100 until the rename.
+///
+/// YouTube throttles a single long range after a short burst, which is why a whole song is
+/// fetched as small ranges with a few of them in flight; the streaming path never waits for
+/// all of it, so it does not feel this. Every piece is written straight to disk at its
+/// offset, so memory stays flat however long the song is.
+pub(crate) async fn download_ranged(
+    url: &str,
+    headers: &[(&str, &str)],
+    part: &Path,
+    total_hint: Option<u64>,
+    progress: ProgressFn,
+) -> Result<u64> {
+    tokio::fs::File::create(part).await.map_err(|e| ProviderError::Io(e.to_string()))?;
+    let ranged = Ranged::new(url, headers);
+    let mut total = total_hint.filter(|t| *t > 0);
+    let feed = Arc::new(Feed {
+        written: AtomicU64::new(0),
+        total: AtomicU64::new(total.unwrap_or(0)),
+        progress,
+    });
+
+    // The first piece is asked for on its own: it reports the real length.
+    let first_want = total.map_or(CHUNK, |t| PIECE.min(t));
+    let first = ranged.piece(part, 0, first_want, &feed).await?;
+    if let Some(t) = first.total {
+        total = Some(t);
+        feed.total.store(t, Ordering::Relaxed);
+    }
+    if first.whole {
+        return checked_size(part, total).await;
+    }
+    let mut offset = first.got;
+    if offset == 0 {
+        return Err(ProviderError::Tool("the audio server sent no audio".into()));
+    }
+
+    match total {
+        Some(total) if offset < total => {
+            // The rest in small ranges, up to `PARALLEL` at once. The spans do not overlap,
+            // so each task writes its own part of the file without a lock.
+            let mut spans = Vec::new();
+            let mut at = offset;
+            while at < total {
+                let len = PIECE.min(total - at);
+                spans.push((at, len));
+                at += len;
+            }
+            for group in spans.chunks(PARALLEL) {
+                let mut set = tokio::task::JoinSet::new();
+                for &(start, len) in group {
+                    let (ranged, part, feed) = (ranged.clone(), part.to_path_buf(), feed.clone());
+                    set.spawn(async move {
+                        let piece = ranged.piece(&part, start, len, &feed).await?;
+                        Ok::<(u64, u64, Piece), ProviderError>((start, len, piece))
+                    });
+                }
+                while let Some(joined) = set.join_next().await {
+                    let (start, len, piece) =
+                        joined.map_err(|e| ProviderError::Tool(format!("a download piece failed: {e}")))??;
+                    if piece.whole {
+                        return Err(ProviderError::Tool(format!("the server ignored the range at {start}")));
+                    }
+                    if piece.got != len {
+                        return Err(ProviderError::Tool(format!(
+                            "the server sent {} bytes from {start}, not {len}",
+                            piece.got
+                        )));
+                    }
+                }
+            }
         }
-        if whole {
-            break;
-        }
-        // A short answer means the file ended, even when the server never said its size.
-        if total.is_none() && got < want {
-            break;
+        Some(_) => {}
+        None => {
+            // No length from the server: keep asking until a short answer ends the file.
+            loop {
+                let piece = ranged.piece(part, offset, CHUNK, &feed).await?;
+                offset += piece.got;
+                if piece.whole || piece.got < CHUNK {
+                    break;
+                }
+            }
         }
     }
 
+    checked_size(part, total).await
+}
+
+/// The size on disk, refused when it disagrees with the length the server stated.
+async fn checked_size(part: &Path, total: Option<u64>) -> Result<u64> {
     let size = tokio::fs::metadata(part).await.map(|m| m.len()).unwrap_or(0);
     if let Some(total) = total {
         if size != total {
@@ -214,5 +348,70 @@ mod tests {
         assert_eq!(parse_content_range("bytes 100-199/*"), Some((100, 199, None)));
         assert_eq!(parse_content_range("bytes 9-0/5"), None);
         assert_eq!(parse_content_range("items 0-1/2"), None);
+    }
+
+    /// A whole song is fetched as several ranges at once, and every byte lands in place.
+    #[tokio::test]
+    async fn downloads_a_song_in_parallel_pieces() {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let total = PIECE as usize * 2 + 320_000;
+        let data: Arc<Vec<u8>> = Arc::new((0..total).map(|i| (i % 251) as u8).collect());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = Arc::new(AtomicUsize::new(0));
+        let server = {
+            let (data, served) = (data.clone(), served.clone());
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else { return };
+                    let (data, served) = (data.clone(), served.clone());
+                    tokio::spawn(async move {
+                        let mut head = Vec::new();
+                        let mut buf = [0u8; 4096];
+                        loop {
+                            let n = socket.read(&mut buf).await.unwrap_or(0);
+                            if n == 0 {
+                                return;
+                            }
+                            head.extend_from_slice(&buf[..n]);
+                            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        let text = String::from_utf8_lossy(&head).to_ascii_lowercase();
+                        let range = text.lines().find_map(|line| {
+                            let v = line.trim().strip_prefix("range: bytes=")?;
+                            let (a, b) = v.split_once('-')?;
+                            Some((a.trim().parse::<u64>().ok()?, b.trim().parse::<u64>().ok()?))
+                        });
+                        let end = data.len() as u64 - 1;
+                        let (start, last) = range.map_or((0, end), |(a, b)| (a, b.min(end)));
+                        served.fetch_add(1, Ordering::SeqCst);
+                        let body = &data[start as usize..=last as usize];
+                        let reply = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{last}/{}\r\nConnection: close\r\n\r\n",
+                            body.len(),
+                            data.len()
+                        );
+                        let _ = socket.write_all(reply.as_bytes()).await;
+                        let _ = socket.write_all(body).await;
+                    });
+                }
+            })
+        };
+
+        let dir = std::env::temp_dir().join(format!("meowtify-fetch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let part = dir.join("song.m4a.part");
+        let size = download_ranged(&format!("http://{addr}/song"), &[], &part, Some(data.len() as u64), Arc::new(|_| {}))
+            .await
+            .unwrap();
+        assert_eq!(size, data.len() as u64);
+        assert_eq!(std::fs::read(&part).unwrap(), *data, "the pieces did not land in order");
+        assert!(served.load(Ordering::SeqCst) >= 3, "the song was not split into ranges");
+        let _ = std::fs::remove_dir_all(&dir);
+        server.abort();
     }
 }

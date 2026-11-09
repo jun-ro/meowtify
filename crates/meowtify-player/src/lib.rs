@@ -533,7 +533,16 @@ impl Worker {
         let target_pos = pos + 1 + offset;
         let target = self.order[target_pos];
         let queue = self.queue.clone();
-        let p = self.prepare(&queue, target, None)?;
+        let p = match self.prepare(&queue, target, None) {
+            Ok(p) => p,
+            Err(Error::NotFound) => {
+                // The file is gone. Take the song out of the queue, so the list stops showing it
+                // and whatever fills the queue (autoplay) sees the gap and replaces it.
+                self.drop_waiting(target_pos);
+                return Err(Error::NotFound);
+            }
+            Err(e) => return Err(e),
+        };
         let mut passed = offset + 1;
         let from_queued = passed.min(self.queued);
         self.queued -= from_queued;
@@ -543,6 +552,23 @@ impl Worker {
         self.cursor.set(target_pos);
         self.compact();
         Ok(())
+    }
+
+    /// Takes the waiting song at play-order position `at` out of the queue, and out of the queued
+    /// or autoplay block it counted in. Songs at or before the loaded one are left alone.
+    fn drop_waiting(&mut self, at: usize) {
+        let pos = self.pos();
+        if at <= pos || at >= self.order.len() {
+            return;
+        }
+        let waiting = at - pos - 1;
+        self.order.remove(at);
+        if waiting < self.queued {
+            self.queued -= 1;
+        } else if waiting < self.queued + self.auto {
+            self.auto -= 1;
+        }
+        self.queue_dirty = true;
     }
 
     /// Forgets songs far behind the loaded one, so a long session does not keep every song it

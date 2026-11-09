@@ -11,6 +11,10 @@ pub struct Settings {
     pub library_dir: Option<PathBuf>,
     /// Show the playing song on the user's Discord profile.
     pub discord: bool,
+    /// Save data on a metered link (a phone's cellular): downloads use the low bitrate AAC
+    /// instead of the best one, and are replaced by the better copy once an unmetered link
+    /// (Wi-Fi) is back. Off by default.
+    pub low_bitrate: bool,
     /// Start playing a YouTube result while it is still downloading. Off by default.
     pub stream_playback: bool,
     /// When the queue runs out, keep playing songs close to the current one. Off by default.
@@ -44,6 +48,7 @@ impl Default for Settings {
         Settings {
             library_dir: None,
             discord: false,
+            low_bitrate: false,
             stream_playback: false,
             autoplay: false,
             autoplay_ahead: 8,
@@ -125,7 +130,7 @@ mod tests {
 
     #[test]
     fn round_trips_and_tolerates_unknown_or_missing_fields() {
-        let s = Settings { library_dir: Some(PathBuf::from("D:/Music")), discord: true, stream_playback: true, autoplay: true, autoplay_ahead: 12, autoplay_behind: 1, lastfm_key: "k".into(), proxy: "socks5h://h:1".into(), jam_relay: "wss://j.example".into(), jam_name: "Sleepy Otter".into(), jam_hue: Some(200), jam_share_ip: true };
+        let s = Settings { library_dir: Some(PathBuf::from("D:/Music")), discord: true, low_bitrate: true, stream_playback: true, autoplay: true, autoplay_ahead: 12, autoplay_behind: 1, lastfm_key: "k".into(), proxy: "socks5h://h:1".into(), jam_relay: "wss://j.example".into(), jam_name: "Sleepy Otter".into(), jam_hue: Some(200), jam_share_ip: true };
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
         assert_eq!(serde_json::from_str::<Settings>("{}").unwrap(), Settings::default());

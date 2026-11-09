@@ -11,6 +11,10 @@ mod native;
 #[cfg(target_os = "ios")]
 mod folder;
 #[cfg(target_os = "ios")]
+mod context_menu;
+#[cfg(target_os = "ios")]
+mod photo;
+#[cfg(target_os = "ios")]
 mod speech;
 
 #[cfg(target_os = "ios")]
@@ -67,6 +71,7 @@ mod app {
         if let Err(e) = meowtify_provider::set_proxy(&settings.proxy) {
             eprintln!("ignoring the saved proxy: {e}");
         }
+        meowtify_provider::set_low_bitrate(settings.low_bitrate);
 
         let rt_handle = rt.handle().clone();
         let (handle, commands) = AppHandle::new(32, 64);
@@ -105,12 +110,16 @@ mod app {
             autoplay: autoplay_control,
             open_links: Some(links_rx),
             folder_picker: Some(Box::new(|done| crate::folder::pick(done))),
+            cover_picker: Some(Box::new(|done| crate::photo::pick(done))),
+            native_menu: Some(Box::new(|rows, chosen| crate::context_menu::present(rows, chosen))),
             dictation: Some(meowtify_ui::Dictation {
                 start: Box::new(|on_text| crate::speech::dictate(on_text)),
                 stop: Box::new(crate::speech::stop_dictation),
             }),
             settings,
         };
+        // The lock screen's cover comes from the UI's cover cache.
+        meowtify_ui::set_now_art_hook(crate::native::set_now_playing_artwork);
         let result = meowtify_ui::run(handle, services, events, rt_handle);
         autoplay.stop();
         if let Err(e) = result {

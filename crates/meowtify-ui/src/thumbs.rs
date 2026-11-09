@@ -68,6 +68,11 @@ impl Images {
 /// Called on the UI thread with the id and the image, or `None` when it failed.
 type Listener = Box<dyn Fn(&str, Option<&Image>)>;
 
+/// Called on the UI thread with the video id and its encoded cover, or `None` for the cover
+/// when the playing song has none. Only iOS has a lock screen to fill.
+#[cfg(target_os = "ios")]
+type ArtListener = Box<dyn Fn(Option<&str>, Option<&[u8]>)>;
+
 pub(crate) struct Thumbs {
     rt: tokio::runtime::Handle,
     disk: Option<Arc<DiskCache>>,
@@ -77,6 +82,16 @@ pub(crate) struct Thumbs {
     /// load answers all of them, so a task (with its url and buffers) exists once per id.
     pending: RefCell<HashSet<String>>,
     images: RefCell<Images>,
+    /// The encoded cover of the song the lock screen shows, so a track change to a cover that
+    /// is already decoded does not need the network again. One entry.
+    #[cfg(target_os = "ios")]
+    art: RefCell<Option<(String, Arc<Vec<u8>>)>>,
+    /// The video id the lock screen wants the cover of. Bytes that land for another id are
+    /// dropped, so a stale fetch cannot put the wrong art on the lock screen.
+    #[cfg(target_os = "ios")]
+    art_want: RefCell<Option<String>>,
+    #[cfg(target_os = "ios")]
+    art_listener: RefCell<Option<ArtListener>>,
 }
 
 impl Thumbs {
@@ -89,6 +104,12 @@ impl Thumbs {
             listeners: RefCell::new(Vec::new()),
             pending: RefCell::new(HashSet::new()),
             images: RefCell::new(Images::default()),
+            #[cfg(target_os = "ios")]
+            art: RefCell::new(None),
+            #[cfg(target_os = "ios")]
+            art_want: RefCell::new(None),
+            #[cfg(target_os = "ios")]
+            art_listener: RefCell::new(None),
         }
     }
 
@@ -110,6 +131,74 @@ impl Thumbs {
 
     pub(crate) fn listen(&self, f: impl Fn(&str, Option<&Image>) + 'static) {
         self.listeners.borrow_mut().push(Box::new(f));
+    }
+
+    /// iOS: where the lock screen's cover goes. Called on the UI thread with the video id and
+    /// its encoded cover, or `None` for the cover when the playing song has none.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn art_listener(&self, f: impl Fn(Option<&str>, Option<&[u8]>) + 'static) {
+        *self.art_listener.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// iOS: the lock screen shows the cover of `id` now. Hands the bytes over straight away when
+    /// they are still here, or when the fetch already on its way lands; `None` clears the cover.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn art(&self, id: &str, url: &str) {
+        *self.art_want.borrow_mut() = Some(id.to_string());
+        let hit = self.art.borrow().as_ref().filter(|(k, _)| k == id).map(|(_, b)| b.clone());
+        if let Some(b) = hit {
+            self.deliver_art(Some(id), Some(b.as_slice()));
+            return;
+        }
+        // The last song's cover must not stay while this one loads.
+        self.art.borrow_mut().take();
+        self.deliver_art(None, None);
+        if !self.images.borrow().map.contains_key(id) {
+            return; // the fetch `cover_of` just started answers when it lands
+        }
+        // Decoded and in memory, but its bytes went with another song: read them again, disk
+        // first, so going back to a song does not wait for the network.
+        let (id, url) = (id.to_string(), url.to_string());
+        let (disk, rt) = (self.disk.clone(), self.rt.clone());
+        rt.spawn(async move {
+            let bytes = match &disk {
+                Some(d) => {
+                    let (d, k) = (d.clone(), id.clone());
+                    tokio::task::spawn_blocking(move || d.get(&k)).await.ok().flatten().map(Arc::new)
+                }
+                None => None,
+            };
+            let bytes = match bytes {
+                Some(b) => Some(b),
+                None => fetch_thumbnail(&url).await.ok().map(Arc::new),
+            };
+            let Some(bytes) = bytes else { return };
+            let _ = slint::invoke_from_event_loop(move || {
+                crate::THUMBS.with(|t| {
+                    if let Some(t) = t.borrow().as_ref() {
+                        if t.art_want.borrow().as_deref() == Some(id.as_str()) {
+                            t.art.borrow_mut().replace((id.clone(), bytes.clone()));
+                            t.deliver_art(Some(&id), Some(bytes.as_slice()));
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    /// iOS: the playing song has no cover; the lock screen shows none.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn clear_art(&self) {
+        self.art_want.borrow_mut().take();
+        self.art.borrow_mut().take();
+        self.deliver_art(None, None);
+    }
+
+    #[cfg(target_os = "ios")]
+    fn deliver_art(&self, id: Option<&str>, bytes: Option<&[u8]>) {
+        if let Some(l) = self.art_listener.borrow().as_ref() {
+            l(id, bytes);
+        }
     }
 
     /// Starts loading the image for `id` from `url`. The answer goes to the listeners. A cover
@@ -149,6 +238,9 @@ impl Thumbs {
                     Err(_) => None,
                 },
             };
+            // The lock screen may want these bytes, and the decode below takes the only Arc.
+            #[cfg(target_os = "ios")]
+            let art = bytes.clone();
             let buf = match bytes {
                 Some(b) => tokio::task::spawn_blocking(move || {
                     let d = decode_square(&b, SIDE).ok()?;
@@ -171,6 +263,14 @@ impl Thumbs {
                         }
                         for l in t.listeners.borrow().iter() {
                             l(&id, img.as_ref());
+                        }
+                        // The cover of the playing song, when the lock screen waits for it.
+                        #[cfg(target_os = "ios")]
+                        if t.art_want.borrow().as_deref() == Some(id.as_str()) {
+                            if let Some(b) = &art {
+                                t.art.borrow_mut().replace((id.clone(), b.clone()));
+                                t.deliver_art(Some(&id), Some(b.as_slice()));
+                            }
                         }
                     }
                 });

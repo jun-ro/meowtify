@@ -10,6 +10,7 @@ mod error;
 pub mod growth;
 mod ids;
 mod message;
+pub mod quality;
 mod traits;
 mod types;
 

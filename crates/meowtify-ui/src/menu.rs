@@ -73,6 +73,88 @@ impl Browser {
         *self.menu_target.borrow_mut() = target;
     }
 
+    /// The rows of the context menu for the item that was just long-pressed, for a platform that
+    /// draws its own menu (iOS). The same labels, actions and red rows as the popup in app.slint.
+    pub(crate) fn menu_rows(&self, kind: i32, idx: i32) -> Vec<crate::NativeRow> {
+        use crate::NativeRow;
+        let mut rows: Vec<NativeRow> = Vec::new();
+        let at = usize::try_from(idx).ok();
+        let installed = match kind {
+            0 | 3 => true,
+            1 => match at.and_then(|i| self.menu_track_uri(1, i)) {
+                Some(uri) => self.library.as_ref().is_some_and(|l| l.find(&uri).is_some()),
+                None => false,
+            },
+            _ => false,
+        };
+        let row = |label: &str, action: &'static str, arg: i32, danger: bool| NativeRow { label: label.to_string(), action, arg, danger };
+        if kind == 2 {
+            rows.push(row("Edit\u{2026}", "rename", 0, false));
+            rows.push(row("Export\u{2026}", "export", 0, false));
+            rows.push(row("Delete playlist", "delete", 0, true));
+            return rows;
+        }
+        rows.push(row("Play", "play", 0, false));
+        if kind == 1 && !installed {
+            rows.push(row("Download", "download", 0, false));
+        }
+        if installed {
+            rows.push(row("Play next", "next", 0, false));
+            rows.push(row("Add to queue", "queue", 0, false));
+            // Every playlist is in the menu, as in the popup's scrolling list.
+            if let Some(library) = &self.library {
+                for (i, id) in self.playlist_ids.borrow().iter().enumerate() {
+                    if let Some(p) = library.playlists().get(id) {
+                        rows.push(row(&p.name, "add", i as i32, false));
+                    }
+                }
+            }
+            rows.push(row("New playlist\u{2026}", "new", -1, false));
+        }
+        if kind < 2 && installed {
+            rows.push(row("Delete song\u{2026}", "delete", 0, true));
+        }
+        if kind == 0 && matches!(self.st.borrow().kind, Kind::Playlist(_)) {
+            rows.push(row("Remove from playlist", "remove", 0, true));
+        }
+        rows
+    }
+
+    /// A menu was opened on iOS: the platform draws it, and the chosen row goes through
+    /// `context_action`, the same way the popup's `ctx` does. Nothing happens without the hook.
+    pub(crate) fn native_menu(self: &Rc<Self>, send: &Rc<dyn Fn(Command)>, kind: i32, idx: i32) {
+        let Some(show) = crate::NATIVE_MENU.with(|m| m.borrow().clone()) else { return };
+        let rows = self.menu_rows(kind, idx);
+        if rows.is_empty() {
+            return;
+        }
+        let browser = Rc::downgrade(self);
+        let send = send.clone();
+        let present = move || {
+            let Some(b) = browser.upgrade() else { return };
+            let browser = Rc::downgrade(&b);
+            let send = send.clone();
+            show(rows.clone(), Box::new(move |chosen| {
+                let Some(row) = rows.get(chosen) else { return };
+                let (action, arg) = (row.action, row.arg);
+                if let Some(b) = browser.upgrade() {
+                    b.context_action(&send, kind, idx, action, arg);
+                }
+            }));
+        };
+        // `menu-opened` also comes from the Export button, which notes the target and then acts in
+        // the same turn. Showing the menu only after the turn lets that `ctx` cancel it.
+        crate::PENDING_MENU.with(|p| *p.borrow_mut() = Some(Box::new(present)));
+        crate::MENU_TIMER.with(|t| {
+            t.start(slint::TimerMode::SingleShot, Duration::from_millis(0), || {
+                let pending = crate::PENDING_MENU.with(|p| p.borrow_mut().take());
+                if let Some(pending) = pending {
+                    pending();
+                }
+            });
+        });
+    }
+
     /// The playlists whose name contains `text` (any case), for the "add to playlist" search.
     pub(crate) fn filter_playlists(&self, text: &str) {
         let Some(library) = &self.library else { return };
@@ -146,6 +228,8 @@ impl Browser {
     }
 
     pub(crate) fn context_action(self: &Rc<Self>, send: &Rc<dyn Fn(Command)>, kind: i32, idx: i32, action: &str, arg: i32) {
+        // A menu that was about to be shown is not wanted: this is the action it stood for.
+        crate::PENDING_MENU.with(|p| *p.borrow_mut() = None);
         let idx = usize::try_from(idx).ok();
         let Some(library) = self.library.clone() else { return };
         match (kind, action) {
@@ -335,11 +419,38 @@ impl Browser {
     }
 
     /// The tile in the dialog was clicked: choose an image file.
-    pub(crate) fn pick_cover(&self) {
+    pub(crate) fn pick_cover(self: &Rc<Self>) {
+        // iOS has no file dialog: its photo picker answers later, through `cover_picked`.
+        if let Some(pick) = crate::COVER_PICKER.with(|p| p.borrow().clone()) {
+            pick(Box::new(|answer| {
+                let _ = slint::invoke_from_event_loop(move || {
+                    crate::BROWSER.with(|b| {
+                        if let Some(b) = b.borrow().as_ref() {
+                            b.cover_picked(answer);
+                        }
+                    });
+                });
+            }));
+            return;
+        }
         let Some(path) = crate::dialogs::pick_file("Choose a cover image", ("Images", &["png", "jpg", "jpeg"])) else {
             return;
         };
-        match process_cover(&path) {
+        self.cover_chosen(&path);
+    }
+
+    /// The photo library (or the file dialog) came back: a file to use, or a reason it did not.
+    fn cover_picked(self: &Rc<Self>, answer: crate::CoverPick) {
+        match answer {
+            crate::CoverPick::Picked(path) => self.cover_chosen(&path),
+            crate::CoverPick::Failed(e) => self.toast(&e),
+            // Nothing to say about a cancel.
+            crate::CoverPick::Cancelled => {}
+        }
+    }
+
+    fn cover_chosen(self: &Rc<Self>, path: &std::path::Path) {
+        match process_cover(path) {
             Ok((png, img)) => {
                 *self.draft.borrow_mut() = Draft::Set(png);
                 if let Some(w) = self.win.upgrade() {

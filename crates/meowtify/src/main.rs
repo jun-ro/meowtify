@@ -69,6 +69,9 @@ fn main() {
     if let Err(e) = meowtify_provider::set_proxy(&settings.proxy) {
         eprintln!("ignoring the saved proxy: {e}");
     }
+    // A computer has no cellular link, so this never makes a download small here; the
+    // setting is read anyway so a config copied to a phone keeps working.
+    meowtify_provider::set_low_bitrate(settings.low_bitrate);
 
     let rt_handle = rt.handle().clone();
     let (handle, commands) = AppHandle::new(32, 64);
@@ -133,7 +136,7 @@ fn main() {
     };
     let autoplay_control = autoplay.as_ref().map(|a| a.control());
 
-    let result = meowtify_ui::run(handle, Services { source, library, downloads, yt_dlp, discord, autoplay: autoplay_control, open_links: Some(links_rx), dictation: None, folder_picker: None, settings }, events, rt_handle);
+    let result = meowtify_ui::run(handle, Services { source, library, downloads, yt_dlp, discord, autoplay: autoplay_control, open_links: Some(links_rx), dictation: None, folder_picker: None, cover_picker: None, native_menu: None, settings }, events, rt_handle);
     stop.notify_one();
     if let Some(a) = &autoplay {
         a.stop();

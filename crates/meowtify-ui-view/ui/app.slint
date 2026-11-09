@@ -973,6 +973,9 @@ export component MainWindow inherits Window {
         root.menu-idx = idx;
         root.menu-installed = installed;
         root.menu-opened(kind, idx);
+        // On a phone the app draws a native action sheet for this (see `meowtify_ios::context_menu`),
+        // so the popup made for a mouse is not shown.
+        if (root.touch) { return; }
         root.menu-x = max(8px, min(px, root.width - 244px));
         root.menu-y = max(8px, min(py, root.height - 120px - 34px * (root.sources.length + 2) - 8px));
         ctx-menu.show();
@@ -1201,13 +1204,16 @@ export component MainWindow inherits Window {
                 min-width: 0px;
                 VerticalLayout {
 
-                // Search bar, centred.
-                Rectangle {
+                // Search bar, centred. On a phone the field shrinks so the pills sit beside it.
+                search-bar := Rectangle {
                     height: 72px;
+                    property <length> export-w: (root.view == 0 && !root.show-results && root.current-source > 0) ? 84px : 0px;
+                    property <length> downloads-w: root.downloads-label != "Downloads" ? 140px : 0px;
+                    property <length> pills-w: (self.export-w > 0px ? self.export-w + 8px : 0px) + (self.downloads-w > 0px ? self.downloads-w + 8px : 0px);
                     Rectangle {
-                        width: min(560px, parent.width - 48px);
+                        width: root.compact ? parent.width - 32px - search-bar.pills-w : min(560px, parent.width - 48px);
                         height: 40px;
-                        x: (parent.width - self.width) / 2;
+                        x: root.compact ? 16px : (parent.width - self.width) / 2;
                         y: 20px;
                         border-radius: 20px;
                         background: input.has-focus ? Theme.hover : Theme.raised;
@@ -1373,8 +1379,12 @@ export component MainWindow inherits Window {
                         // A Pill placed by x and y fills its parent unless given a width.
                         width: 84px;
                         height: 30px;
-                        x: parent.width - self.width - 24px - (root.downloads-label != "Downloads" ? 150px : 0px);
-                        y: 22px;
+                        // On a phone sit flush against the field, centred on it; on the desktop keep
+                        // the old inset beside the centred field.
+                        x: root.compact
+                            ? parent.width - 16px - search-bar.downloads-w - (search-bar.downloads-w > 0px ? 8px : 0px) - self.width
+                            : parent.width - self.width - 24px - (root.downloads-label != "Downloads" ? 150px : 0px);
+                        y: root.compact ? 25px : 22px;
                         text: "Export";
                         primary: false;
                         clicked => {
@@ -1385,8 +1395,8 @@ export component MainWindow inherits Window {
                     // Downloads shortcut, only while something is downloading.
                     if root.downloads-label != "Downloads": Pill {
                         width: 140px;
-                        x: parent.width - self.width - 24px;
-                        y: 20px;
+                        x: root.compact ? parent.width - self.width - 16px : parent.width - self.width - 24px;
+                        y: root.compact ? 23px : 20px;
                         text: root.downloads-label;
                         primary: false;
                         clicked => { root.view = 3; }
@@ -1495,7 +1505,12 @@ export component MainWindow inherits Window {
                     lv := ListView {
                         visible: !root.show-results;
                         width: 100%;
-                        height: 100%;
+                        // The rows run behind the phone's player card; the extra scroll length lets
+                        // the last row come out from under it.
+                        // `y` is set because a child with a size of its own is centred by default.
+                        y: 0px;
+                        height: parent.height;
+                        viewport-height: rows.length * 56px + (root.compact ? 180px : 0px);
                         for r[idx] in rows: row := Rectangle {
                             height: 56px;
                             background: ta.pressed ? Theme.raised : (ta.has-hover ? Theme.hover : transparent);
@@ -1584,7 +1599,10 @@ export component MainWindow inherits Window {
                     ListView {
                         visible: root.show-results;
                         width: 100%;
-                        height: 100%;
+                        y: 0px;
+                        height: parent.height;
+                        // Rows run behind the phone's player card; extra length lets the last one clear it.
+                        viewport-height: root.results.length * 56px + (root.compact ? 180px : 0px);
                         // Near the end of the list, or the list is too short to scroll at all: ask for more.
                         changed content-y => { if (self.content-height + self.content-y < self.visible-height + 280px) { root.load-more(); } }
                         changed content-height => { if (self.content-height + self.content-y < self.visible-height + 280px) { root.load-more(); } }
@@ -1695,7 +1713,7 @@ export component MainWindow inherits Window {
                     }
 
                     if root.show-results && root.more-busy: Rectangle {
-                        y: parent.height - 36px;
+                        y: parent.height - 36px - (root.compact ? 180px : 0px);
                         height: 36px;
                         background: Theme.bg;
                         Label { text: "Loading more\u{2026}"; color: Theme.muted; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
@@ -1768,7 +1786,11 @@ export component MainWindow inherits Window {
                     // Scroll up and down only. Without this the page is as wide as its widest line.
                     content-width: self.width;
                     VerticalLayout {
-                        padding: root.compact ? 16px : 32px;
+                        padding-left: root.compact ? 16px : 32px;
+                        padding-right: root.compact ? 16px : 32px;
+                        padding-top: root.compact ? 16px : 32px;
+                        // The phone's player card floats over the page; the last row must clear it.
+                        padding-bottom: root.compact ? 180px : 32px;
                         spacing: 8px;
                         alignment: start;
                         Label { text: "Settings"; color: Theme.text; font-size: 24px; font-weight: 800; height: 44px; }
@@ -2111,7 +2133,11 @@ export component MainWindow inherits Window {
                     Flickable {
                         content-width: self.width;
                         VerticalLayout {
-                            padding: 16px;
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            padding-top: 16px;
+                            // The phone's player card floats over the page; the last row must clear it.
+                            padding-bottom: root.compact ? 180px : 16px;
                             spacing: 4px;
                             alignment: start;
                             Label { text: "Playlists"; color: Theme.text; font-size: 24px; font-weight: 800; height: 44px; }
@@ -2153,7 +2179,11 @@ export component MainWindow inherits Window {
                     // Scroll up and down only.
                     content-width: self.width;
                     VerticalLayout {
-                        padding: root.compact ? 16px : 32px;
+                        padding-left: root.compact ? 16px : 32px;
+                        padding-right: root.compact ? 16px : 32px;
+                        padding-top: root.compact ? 16px : 32px;
+                        // The phone's player card floats over the page; the last row must clear it.
+                        padding-bottom: root.compact ? 180px : 32px;
                         spacing: 8px;
                         alignment: start;
                         Label { text: "Jam"; color: Theme.text; font-size: 24px; font-weight: 800; height: 44px; }
@@ -2190,17 +2220,19 @@ export component MainWindow inherits Window {
                             }
                         }
                         Label { text: "CAT COLOUR"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
-                        // The swatches scroll sideways when the screen is too narrow for all of them.
-                        Flickable {
-                            height: 34px;
-                            min-width: 0px;
-                            preferred-width: 0px;
-                            content-width: hue-row.preferred-width;
-                            hue-row := HorizontalLayout {
+                        // 12 colours plus Auto. When the row is too narrow, wrap into two rows so no
+                        // swatch is cut off at the right edge; on a wide window they stay on one line.
+                        VerticalLayout {
+                            height: (root.compact || root.width < 860px) ? 76px : 34px;
+                            spacing: 8px;
+                            alignment: start;
+                            HorizontalLayout {
+                                height: 34px;
                                 spacing: 8px;
                                 alignment: start;
                                 Pill { text: "Auto"; primary: root.jam-hue < 0; clicked => { root.jam-set-hue(-1); } }
-                                for sw in root.jam-palette: Rectangle {
+                                for sw[idx] in root.jam-palette: Rectangle {
+                                    visible: !(root.compact || root.width < 860px) || idx < 6;
                                     width: 34px;
                                     height: 34px;
                                     border-radius: 17px;
@@ -2208,6 +2240,23 @@ export component MainWindow inherits Window {
                                     border-width: root.jam-hue == sw.hue ? 3px : (sa.has-hover ? 2px : 0px);
                                     border-color: Theme.text;
                                     sa := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.jam-set-hue(sw.hue); } }
+                                }
+                            }
+                            // Second row. Placed by `x`, not in a layout: a hidden item still takes its
+                            // place in a layout, which pushed the visible swatches to the right.
+                            if root.compact || root.width < 860px: Rectangle {
+                                height: 34px;
+                                for sw[idx] in root.jam-palette: Rectangle {
+                                    visible: idx >= 6;
+                                    x: (idx - 6) * 42px;
+                                    y: 0px;
+                                    width: 34px;
+                                    height: 34px;
+                                    border-radius: 17px;
+                                    background: sw.color;
+                                    border-width: root.jam-hue == sw.hue ? 3px : (sa2.has-hover ? 2px : 0px);
+                                    border-color: Theme.text;
+                                    sa2 := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.jam-set-hue(sw.hue); } }
                                 }
                             }
                         }
@@ -2397,6 +2446,8 @@ export component MainWindow inherits Window {
                                 }
                             }
                         }
+                        // The phone's player card floats over this pane; keep the last job clear of it.
+                        Rectangle { height: root.compact ? 180px : 0px; }
                     }
                 }
             }
@@ -2404,9 +2455,11 @@ export component MainWindow inherits Window {
 
         // Now-playing bar.
         Rectangle {
-            height: root.bar-h;
-            // On a phone the song card floats above the player panel, over the page colour.
-            background: root.compact ? Theme.bg : Theme.panel;
+            // On a phone only the tab bar at the foot is needed here; the song card floats over
+            // the page above it, so the bar must not reserve (or paint) a full panel strip.
+            height: root.compact ? root.nav-h : root.bar-h;
+            // A transparent background in compact lets the page show through beside the song tab.
+            background: root.compact ? transparent : Theme.panel;
             Rectangle { y: 0; height: 1px; background: Theme.raised; visible: !root.compact; }
             bar := Rectangle {
                 property <length> mid: max(260px, min(560px, self.width - 520px));
@@ -2601,10 +2654,10 @@ export component MainWindow inherits Window {
                 // queue that opens under the card, are drawn further down.
                 if root.compact: Rectangle {
                     width: parent.width;
-                    height: root.bar-h;
+                    height: parent.height;
                     Rectangle {
-                        y: 148px;
-                        height: parent.height - 148px;
+                        y: 0;
+                        height: parent.height;
                         background: Theme.panel;
                         Rectangle { y: 0; height: 1px; background: Theme.raised; }
                         HorizontalLayout {

@@ -25,10 +25,13 @@ pub use youtube::NativeYouTube;
 
 /// The provider set for a platform without subprocesses: YouTube for downloads, with
 /// SoundCloud and Audius as fallbacks for songs YouTube does not have.
+///
+/// Tagging is on: there is no yt-dlp here to write title and artist, and the library reads
+/// the artist only from tags, so an untagged download would show "Unknown artist".
 #[cfg(any(target_os = "ios", feature = "native-extract"))]
 pub fn providers() -> (std::sync::Arc<dyn crate::Provider>, Vec<std::sync::Arc<dyn crate::Provider>>) {
-    let download: std::sync::Arc<dyn crate::Provider> = std::sync::Arc::new(NativeYouTube::new());
+    let download: std::sync::Arc<dyn crate::Provider> = std::sync::Arc::new(NativeYouTube::with_tagging(true));
     let fallbacks: Vec<std::sync::Arc<dyn crate::Provider>> =
-        vec![std::sync::Arc::new(NativeSoundCloud::new()), std::sync::Arc::new(crate::audius::Audius)];
+        vec![std::sync::Arc::new(NativeSoundCloud::with_tagging(true)), std::sync::Arc::new(crate::audius::Audius)];
     (download, fallbacks)
 }
