@@ -15,6 +15,7 @@ mkdir -p "$app"
 cp "$bin" "$app/meowtify-ios"
 chmod +x "$app/meowtify-ios"
 sed "s/__VERSION__/$version/g" "$here/Info.plist" > "$app/Info.plist"
+cp "$here"/icons/*.png "$app/"
 printf 'APPL????' > "$app/PkgInfo"
 
 mkdir -p "$(dirname "$out")"
