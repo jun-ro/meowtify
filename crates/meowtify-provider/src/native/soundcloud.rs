@@ -27,6 +27,67 @@ const MAX_SEARCH: u32 = 25;
 const CLIENT_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const MIN_AUDIO: u64 = 32 * 1024;
 const PAGE: usize = 4 * 1024 * 1024;
+const CLIENT_FILE: &str = "soundcloud-client.txt";
+
+/// Where the scraped client id is kept between app launches. iOS gets a Caches folder;
+/// desktop gets the user's local cache folder.
+fn cache_file() -> Option<PathBuf> {
+    let dir = if cfg!(target_os = "ios") {
+        PathBuf::from(std::env::var_os("HOME")?).join("Library").join("Caches").join("meowtify")
+    } else if let Some(dir) = std::env::var_os("MEOWTIFY_CACHE_DIR") {
+        PathBuf::from(dir)
+    } else if cfg!(windows) {
+        PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Meowtify").join("cache")
+    } else if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
+        PathBuf::from(dir).join("meowtify")
+    } else {
+        PathBuf::from(std::env::var_os("HOME")?).join(".cache").join("meowtify")
+    };
+    Some(dir.join(CLIENT_FILE))
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn cache_line(id: &str, now: u64) -> String {
+    format!("{now}\n{id}\n")
+}
+
+/// A stored id is used only while it is young enough and still looks like a client id.
+fn parse_cache_line(text: &str, now: u64) -> Option<String> {
+    let mut lines = text.lines();
+    let at: u64 = lines.next()?.trim().parse().ok()?;
+    let id = lines.next()?.trim();
+    (now.saturating_sub(at) <= CLIENT_TTL.as_secs() && valid_client_id(id)).then(|| id.to_string())
+}
+
+fn valid_client_id(id: &str) -> bool {
+    (16..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+async fn read_cached_client_id(now: u64) -> Option<String> {
+    let path = cache_file()?;
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    parse_cache_line(&text, now)
+}
+
+async fn write_cached_client_id(id: &str, now: u64) {
+    let Some(path) = cache_file() else { return };
+    if let Some(dir) = path.parent() {
+        let _ = tokio::fs::create_dir_all(dir).await;
+    }
+    let _ = tokio::fs::write(path, cache_line(id, now)).await;
+}
+
+async fn remove_cached_client_id() {
+    if let Some(path) = cache_file() {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+}
 
 pub struct NativeSoundCloud {
     tagging: bool,
@@ -55,13 +116,20 @@ impl NativeSoundCloud {
                 return Ok(id.clone());
             }
         }
+        let now = now_secs();
+        if let Some(id) = read_cached_client_id(now).await {
+            *slot = Some((id.clone(), Instant::now()));
+            return Ok(id);
+        }
         let id = scrape_client_id().await?;
         *slot = Some((id.clone(), Instant::now()));
+        write_cached_client_id(&id, now).await;
         Ok(id)
     }
 
     async fn forget_client(&self) {
         *self.client.lock().await = None;
+        remove_cached_client_id().await;
     }
 
     /// GETs an api-v2 URL, retrying once with a fresh `client_id` when it is refused.
@@ -98,7 +166,17 @@ impl NativeSoundCloud {
         let path = dest_dir.join(file_name(item, ext));
         let part = path.with_extension(format!("{ext}.part"));
         let guard = fetch::PartFile::new(part.clone());
-        let size = fetch::download_plain(url, &[("User-Agent", http::DESKTOP_UA)], &part, progress.clone()).await?;
+        let mut attempt = 0;
+        let size = loop {
+            match fetch::download_plain(url, &[("User-Agent", http::DESKTOP_UA)], &part, progress.clone()).await {
+                Ok(size) => break size,
+                Err(e) if attempt == 0 && http::transient(&e) => {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        };
         if size < MIN_AUDIO {
             return Err(ProviderError::Tool("SoundCloud sent no audio for this track".into()));
         }
@@ -643,6 +721,17 @@ mod tests {
         };
         assert_eq!(file_name(&item, "mp3"), "AC_DC_ Back _in_ Black_ [718846078].mp3");
         assert!(valid_track_id("718846078") && !valid_track_id("../x"));
+    }
+
+    #[test]
+    fn reads_and_expires_a_cached_client_id() {
+        let now = 1_700_000_000;
+        let text = cache_line("39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ", now);
+        assert_eq!(parse_cache_line(&text, now).as_deref(), Some("39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ"));
+        assert_eq!(parse_cache_line(&text, now + CLIENT_TTL.as_secs() + 1), None);
+        assert_eq!(parse_cache_line("nope", now), None);
+        assert_eq!(parse_cache_line(&format!("{now}\nshort\n"), now), None);
+        assert!(valid_client_id("39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ"));
     }
 
     /// Needs the network: `cargo test -p meowtify-provider --features native-extract live_native_sc -- --ignored --nocapture`

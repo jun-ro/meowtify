@@ -789,12 +789,19 @@ impl Provider for NativeYouTube {
         let part = path.with_extension("m4a.part");
         let guard = fetch::PartFile::new(part.clone());
         let headers = [("User-Agent", found.stream.user_agent.as_str()), ("Accept", "*/*")];
-        let result = fetch::download_ranged(&found.stream.url, &headers, &part, found.stream.size, progress.clone()).await;
-        let size = match result {
-            Ok(size) => size,
-            Err(e) => {
-                self.cache.forget(&item.id);
-                return Err(e);
+        let mut attempt = 0;
+        let size = loop {
+            match fetch::download_ranged(&found.stream.url, &headers, &part, found.stream.size, progress.clone()).await {
+                Ok(size) => break size,
+                // A connection reset or timeout can be tried again; a refusal cannot.
+                Err(e) if attempt == 0 && http::transient(&e) => {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Err(e) => {
+                    self.cache.forget(&item.id);
+                    return Err(e);
+                }
             }
         };
         if size < MIN_AUDIO {

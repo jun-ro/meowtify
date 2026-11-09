@@ -81,8 +81,17 @@ pub struct Services {
     pub autoplay: Option<meowtify_autoplay::Control>,
     /// `meowtify://jam/…` links that were opened from outside the app. `None` ignores them.
     pub open_links: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+    /// Speech to text for the search box. `None` hides the microphone button.
+    pub dictation: Option<Dictation>,
     /// The settings as read at startup. The window shows these and saves its own edits.
     pub settings: Settings,
+}
+
+/// Speech to text, supplied by the platform. `start` listens and calls the function it is given
+/// with the text heard so far and whether that text is final; it may call it from any thread.
+pub struct Dictation {
+    pub start: Box<dyn Fn(Box<dyn Fn(String, bool) + Send + Sync>)>,
+    pub stop: Box<dyn Fn()>,
 }
 
 /// Runs the window until it is closed. Must be called on the main thread.
@@ -92,7 +101,7 @@ pub fn run(
     mut events: broadcast::Receiver<Event>,
     rt: tokio::runtime::Handle,
 ) -> Result<(), slint::PlatformError> {
-    let Services { source, library, downloads, yt_dlp, discord, autoplay, open_links, settings } = services;
+    let Services { source, library, downloads, yt_dlp, discord, autoplay, open_links, dictation, settings } = services;
     let win = MainWindow::new()?;
     win.set_touch(cfg!(target_os = "ios"));
     win.set_proxy(settings.proxy.as_str().into());
@@ -356,6 +365,31 @@ pub fn run(
         {
             let get = get.clone();
             win.on_query_edited(move |t| get.query_edited(&t));
+        }
+        if let Some(dictation) = dictation {
+            win.set_dictation(true);
+            let Dictation { start, stop } = dictation;
+            let weak = win.as_weak();
+            win.on_dictate(move || {
+                let Some(w) = weak.upgrade() else { return };
+                w.set_heard(slint::SharedString::default());
+                w.set_dictating(true);
+                let weak = weak.clone();
+                start(Box::new(move |text, last| {
+                    let weak = weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = weak.upgrade() {
+                            w.set_heard(text.into());
+                            if last {
+                                w.set_dictating(false);
+                            }
+                        }
+                    });
+                }));
+            });
+            win.on_dictate_stop(move || {
+                stop();
+            });
         }
         {
             let get = get.clone();

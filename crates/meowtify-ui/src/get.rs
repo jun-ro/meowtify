@@ -184,6 +184,8 @@ pub(crate) struct Get {
     prefetched: RefCell<std::collections::HashSet<String>>,
     hover_timer: slint::Timer,
     top_timer: slint::Timer,
+    /// A `meowtify://play?q=` link asked for a song: play the first result of the next search.
+    play_first: Cell<bool>,
     /// Jobs whose file is already in the library.
     added: RefCell<std::collections::HashSet<u64>>,
     /// Video ids of songs being saved that go to the queue as soon as they are in the library.
@@ -249,6 +251,7 @@ impl Get {
             prefetched: RefCell::new(std::collections::HashSet::new()),
             hover_timer: slint::Timer::default(),
             top_timer: slint::Timer::default(),
+            play_first: Cell::new(false),
             added: RefCell::new(std::collections::HashSet::new()),
             queue_after: RefCell::new(Vec::new()),
         });
@@ -432,7 +435,27 @@ impl Get {
         }
     }
 
+    /// Searches for `text` and plays the first result. A Siri Shortcut opens
+    /// `meowtify://play?q=<title>` to ask for this.
+    pub(crate) fn play_query(self: &Rc<Self>, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        if let Some(w) = self.win.upgrade() {
+            w.set_view(0);
+        }
+        // Set before the search: a cached answer arrives at once.
+        self.play_first.set(true);
+        self.search_with(text);
+    }
+
+    /// Any other search drops a pending "play the first result".
     pub(crate) fn search(self: &Rc<Self>, text: &str) {
+        self.play_first.set(false);
+        self.search_with(text);
+    }
+
+    fn search_with(self: &Rc<Self>, text: &str) {
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
@@ -517,6 +540,11 @@ impl Get {
                     }
                 }
                 *self.items.borrow_mut() = items;
+                if self.play_first.replace(false) && !self.items.borrow().is_empty() {
+                    if let Some(g) = GET.with(|g| g.borrow().clone()) {
+                        g.play(0);
+                    }
+                }
                 // The first result is the likeliest pick. Look it up once the list has stayed a moment.
                 if !self.items.borrow().is_empty() {
                     self.top_timer.start(slint::TimerMode::SingleShot, std::time::Duration::from_millis(700), || {
@@ -1121,5 +1149,48 @@ impl Get {
                 }
             });
         }
+    }
+}
+
+/// The search text of a `meowtify://play?q=<text>` link, decoded. Siri Shortcuts open these.
+pub(crate) fn play_link_query(link: &str) -> Option<String> {
+    let rest = link.trim().strip_prefix("meowtify://play")?;
+    let query = rest.strip_prefix('?')?;
+    let value = query.split('&').find_map(|pair| pair.strip_prefix("q="))?;
+    let mut bytes: Vec<u8> = Vec::with_capacity(value.len());
+    let raw = value.as_bytes();
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i] {
+            b'+' => bytes.push(b' '),
+            b'%' if raw.get(i + 1..i + 3).is_some_and(|h| h.iter().all(u8::is_ascii_hexdigit)) => {
+                let hex = std::str::from_utf8(&raw[i + 1..i + 3]).unwrap_or("00");
+                bytes.push(u8::from_str_radix(hex, 16).unwrap_or(b'?'));
+                i += 2;
+            }
+            b => bytes.push(b),
+        }
+        i += 1;
+    }
+    let text = String::from_utf8_lossy(&bytes).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+#[cfg(test)]
+mod play_link_tests {
+    use super::play_link_query;
+
+    #[test]
+    fn decodes_the_query() {
+        assert_eq!(play_link_query("meowtify://play?q=Midnight%20Drive").as_deref(), Some("Midnight Drive"));
+        assert_eq!(play_link_query("meowtify://play?q=a+b%26c").as_deref(), Some("a b&c"));
+        assert_eq!(play_link_query("meowtify://play?x=1&q=%E5%A4%9C").as_deref(), Some("\u{591c}"));
+    }
+
+    #[test]
+    fn rejects_other_links() {
+        assert_eq!(play_link_query("meowtify://jam/abc"), None);
+        assert_eq!(play_link_query("meowtify://play?q="), None);
+        assert_eq!(play_link_query("meowtify://play"), None);
     }
 }

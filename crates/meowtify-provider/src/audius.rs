@@ -45,7 +45,17 @@ impl Provider for Audius {
         let part = dest.with_extension("mp3.part");
         let guard = fetch::PartFile::new(part.clone());
         let url = format!("{API}/tracks/{}/stream?app_name={APP}", item.id);
-        let len = fetch::download_plain(&url, &[("User-Agent", http::DESKTOP_UA)], &part, progress.clone()).await?;
+        let mut attempt = 0;
+        let len = loop {
+            match fetch::download_plain(&url, &[("User-Agent", http::DESKTOP_UA)], &part, progress.clone()).await {
+                Ok(len) => break len,
+                Err(e) if attempt == 0 && http::transient(&e) => {
+                    attempt += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        };
         // A short file is an error page or a cut connection, not a song.
         if len < MIN_AUDIO {
             return Err(ProviderError::Tool("Audius sent no audio for this track".into()));

@@ -158,7 +158,19 @@ pub(crate) fn install(
     if let Some(mut links) = links {
         rt.spawn(async move {
             while let Some(link) = links.recv().await {
-                if slint::invoke_from_event_loop(move || with(|j| j.invite(&link))).is_err() {
+                // A `meowtify://play?q=…` link (a Siri Shortcut) asks for a song; the rest are jam invites.
+                let sent = if let Some(text) = crate::get::play_link_query(&link) {
+                    slint::invoke_from_event_loop(move || {
+                        crate::get::GET.with(|g| {
+                            if let Some(g) = g.borrow().clone() {
+                                g.play_query(&text);
+                            }
+                        });
+                    })
+                } else {
+                    slint::invoke_from_event_loop(move || with(|j| j.invite(&link)))
+                };
+                if sent.is_err() {
                     break;
                 }
             }

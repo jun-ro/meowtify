@@ -6,6 +6,7 @@
 //! - `MEOWTIFY_SIZE=<w>x<h>` sizes the window; a width under 700 gives the phone layout.
 //! - `MEOWTIFY_TOUCH=1` turns touch mode on (long press opens the row menu).
 //! - `MEOWTIFY_SHEET=1` opens the phone's queue sheet.
+//! - `MEOWTIFY_DICTATION=1` shows the search box's microphone button (it does nothing here).
 //! - `MEOWTIFY_DIALOG=confirm|name` opens that dialog.
 //! - `MEOWTIFY_LYRICS=1` opens the lyrics panel.
 //! - `MEOWTIFY_QUERY=<text>` runs a provider search.
@@ -30,6 +31,9 @@ pub(crate) fn install(win: &MainWindow) -> slint::Timer {
     }
     if std::env::var_os("MEOWTIFY_TOUCH").is_some() {
         win.set_touch(true);
+    }
+    if std::env::var_os("MEOWTIFY_DICTATION").is_some() {
+        win.set_dictation(true);
     }
     if std::env::var_os("MEOWTIFY_SHEET").is_some() {
         win.set_sheet_open(true);

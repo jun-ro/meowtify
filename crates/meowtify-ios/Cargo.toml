@@ -22,3 +22,10 @@ meowtify-autoplay = { path = "../meowtify-autoplay" }
 meowtify-ui = { path = "../meowtify-ui" }
 slint = { workspace = true, features = ["backend-winit", "renderer-skia", "renderer-software"] }
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSDictionary", "NSNotification", "NSValue", "NSURL", "NSObject", "NSOperation", "NSArray", "NSError", "block2"] }
+objc2-avf-audio = { version = "0.3", features = ["AVAudioSession", "AVAudioSessionTypes", "AVAudioApplication", "AVAudioBuffer", "AVAudioEngine", "AVAudioFormat", "AVAudioIONode", "AVAudioNode", "AVAudioTime", "AVAudioTypes", "block2"] }
+objc2-media-player = { version = "0.3", features = ["MPNowPlayingInfoCenter", "MPRemoteCommand", "MPRemoteCommandCenter", "MPRemoteCommandEvent", "MPMediaItem", "block2"] }
+objc2-ui-kit = { version = "0.3", features = ["UIApplication", "UIResponder"] }
+objc2-speech = { version = "0.3", default-features = false, features = ["std", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFTranscription", "block2", "objc2-avf-audio"] }

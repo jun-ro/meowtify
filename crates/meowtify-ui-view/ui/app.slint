@@ -874,6 +874,13 @@ export component MainWindow inherits Window {
     callback yt-search(string);
     /// The text changed: search after a short pause. Empty text cancels.
     callback query-edited(string);
+    /// Speech to text: true when the platform can listen, which shows the microphone button.
+    in property <bool> dictation: false;
+    in-out property <bool> dictating: false;
+    /// What the microphone has heard so far. The search box follows it.
+    in property <string> heard;
+    callback dictate();
+    callback dictate-stop();
     /// The text changed: fetch suggestions for it. Empty text clears them.
     callback suggest-request(string);
     callback play-result(int);
@@ -1240,6 +1247,14 @@ export component MainWindow inherits Window {
                                 font-size: 16px;
                                 single-line: true;
                                 vertical-alignment: center;
+                                // Words from the microphone go into the box like typing would.
+                                property <string> incoming: root.heard;
+                                changed incoming => {
+                                    if (self.incoming != "") {
+                                        self.text = self.incoming;
+                                        root.query-edited(self.text);
+                                    }
+                                }
                                 accepted => {
                                     if (root.suggest-index >= 0 && root.suggest-index < root.suggestions.length) {
                                         self.text = root.suggestions[root.suggest-index];
@@ -1279,7 +1294,7 @@ export component MainWindow inherits Window {
                             visible: input.text == "";
                         }
                         Label {
-                            x: parent.width - 96px - 14px;
+                            x: parent.width - 96px - 14px - (root.dictation ? 32px : 0px);
                             width: 96px;
                             text: root.yt-busy ? "Searching…" : (root.loading ? "Loading…" : "");
                             color: Theme.muted;
@@ -1287,6 +1302,41 @@ export component MainWindow inherits Window {
                             vertical-alignment: center;
                             horizontal-alignment: right;
                             visible: input.text == "" || root.yt-busy || root.loading;
+                        }
+                        // Microphone button: speak the search. Tap again to stop.
+                        Rectangle {
+                            visible: root.dictation;
+                            x: parent.width - 32px - (input.text != "" && !root.yt-busy && !root.loading ? 32px : 0px);
+                            y: 8px;
+                            width: 24px;
+                            height: 24px;
+                            border-radius: 12px;
+                            background: root.dictating ? Theme.accent : (mic.has-hover ? Theme.hover : transparent);
+                            animate background { duration: 120ms; }
+                            mic := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    if (root.dictating) {
+                                        root.dictating = false;
+                                        root.dictate-stop();
+                                    } else {
+                                        root.dictate();
+                                    }
+                                }
+                            }
+                            Path {
+                                x: 4px;
+                                y: 3px;
+                                width: 16px;
+                                height: 18px;
+                                viewbox-width: 16;
+                                viewbox-height: 18;
+                                commands: "M 5.5 3.5 C 5.5 -0.5 10.5 -0.5 10.5 3.5 L 10.5 8 C 10.5 12 5.5 12 5.5 8 Z M 2.5 8 C 2.5 15 13.5 15 13.5 8 M 8 14 L 8 17";
+                                stroke: root.dictating ? Theme.bg : Theme.muted;
+                                stroke-width: 1.6px;
+                                stroke-line-cap: round;
+                                stroke-line-join: round;
+                            }
                         }
                         // Clear button.
                         Rectangle {
@@ -1345,8 +1395,10 @@ export component MainWindow inherits Window {
 
                 // Phone: All Songs on the left, a bar, and the download queue where the playlists were.
                 // The playlists have their own tab.
-                if root.compact && root.view == 0: Rectangle {
-                    height: 44px;
+                // Always built, 0 high when hidden, so the flying chip can find the queue.
+                Rectangle {
+                    visible: root.compact && root.view == 0;
+                    height: (root.compact && root.view == 0) ? 44px : 0px;
                     HorizontalLayout {
                         padding-left: 16px;
                         padding-right: 16px;
@@ -1374,7 +1426,7 @@ export component MainWindow inherits Window {
                             background: #3a3a42;
                         }
                         // Downloads, newest first. A tap opens the whole list.
-                        Flickable {
+                        dq-anchor := Flickable {
                             horizontal-stretch: 1;
                             min-width: 0px;
                             preferred-width: 0px;
@@ -1386,7 +1438,8 @@ export component MainWindow inherits Window {
                                     width: 130px;
                                     Label {
                                         text: "Download Queue...";
-                                        color: Theme.muted;
+                                        color: root.fly-on ? Theme.accent : Theme.muted;
+                                        animate color { duration: 260ms; }
                                         font-size: 14px;
                                         vertical-alignment: center;
                                     }
@@ -2625,10 +2678,21 @@ export component MainWindow inherits Window {
             }
             ListView {
                 vertical-stretch: 1;
-                for item[idx] in root.up-next: Rectangle {
+                for item[idx] in root.up-next: qitem := Rectangle {
                     height: 56px;
                     background: qrow.pressed ? Theme.raised : transparent;
                     border-radius: 8px;
+                    /// A long press opened the menu, so the release that follows is not a tap.
+                    property <bool> long-pressed: false;
+                    qlp := Timer {
+                        interval: 450ms;
+                        running: false;
+                        triggered => {
+                            self.running = false;
+                            qitem.long-pressed = true;
+                            root.open-menu(3, idx, true, qrow.absolute-position.x + qrow.mouse-x, qrow.absolute-position.y + qrow.mouse-y);
+                        }
+                    }
                     Rectangle {
                         x: 0;
                         y: 10px;
@@ -2656,7 +2720,25 @@ export component MainWindow inherits Window {
                             Label { text: item.artist; color: Theme.muted; font-size: 14px; overflow: elide; }
                         }
                     }
-                    qrow := TouchArea { clicked => { root.jump-to(idx); root.sheet-open = false; } }
+                    qrow := TouchArea {
+                        clicked => {
+                            if (qitem.long-pressed) {
+                                qitem.long-pressed = false;
+                            } else {
+                                root.jump-to(idx);
+                                root.sheet-open = false;
+                            }
+                        }
+                        pointer-event(e) => {
+                            if (root.touch && e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                                qitem.long-pressed = false;
+                                qlp.running = true;
+                            }
+                            if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                                qlp.running = false;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2843,8 +2925,8 @@ export component MainWindow inherits Window {
                 }
                 if root.menu-kind != 2 && root.menu-installed && root.sources.length > 9: MenuItem { label: "Find a playlist\u{2026}"; clicked => { root.picker-open = true; root.picker-filter(""); } }
                 if root.menu-kind != 2 && root.menu-installed: MenuItem { label: "New playlist\u{2026}"; clicked => { root.ctx(root.menu-kind, root.menu-idx, "new", -1); } }
-                if root.menu-kind != 2 && root.menu-installed: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.raised; } }
-                if root.menu-kind != 2 && root.menu-installed: MenuItem { label: "Delete song\u{2026}"; danger: true; clicked => { root.ctx(root.menu-kind, root.menu-idx, "delete", 0); } }
+                if root.menu-kind < 2 && root.menu-installed: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.raised; } }
+                if root.menu-kind < 2 && root.menu-installed: MenuItem { label: "Delete song\u{2026}"; danger: true; clicked => { root.ctx(root.menu-kind, root.menu-idx, "delete", 0); } }
                 if root.menu-kind == 0 && root.viewing-playlist: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.raised; } }
                 if root.menu-kind == 0 && root.viewing-playlist: MenuItem { label: "Remove from playlist"; danger: true; clicked => { root.ctx(0, root.menu-idx, "remove", 0); } }
             }
@@ -3141,8 +3223,8 @@ export component MainWindow inherits Window {
         background: Theme.accent;
         states [
             flying when root.fly-on: {
-                x: queue-label.absolute-position.x + 8px;
-                y: queue-label.absolute-position.y + 8px;
+                x: (root.compact ? dq-anchor.absolute-position.x : queue-label.absolute-position.x) + 8px;
+                y: (root.compact ? dq-anchor.absolute-position.y : queue-label.absolute-position.y) + 8px;
                 width: 12px;
                 height: 12px;
                 opacity: 0;

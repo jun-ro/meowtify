@@ -67,6 +67,7 @@ impl Browser {
             0 => self.model.get(idx).map(|t| MenuTarget::Track(t.uri.clone())),
             1 => get::GET.with(|g| g.borrow().as_ref().and_then(|g| g.item_id(idx))).map(MenuTarget::Result),
             2 => self.playlist_id_at(idx).map(MenuTarget::Playlist),
+            3 => crate::UP_NEXT.with(|c| c.borrow().get(idx).map(|(u, _, _)| MenuTarget::Track(Arc::from(u.as_str())))),
             _ => None,
         };
         *self.menu_target.borrow_mut() = target;
@@ -94,7 +95,7 @@ impl Browser {
     /// File path of the song a menu row stands for, when it is in the library.
     fn menu_track_uri(&self, kind: i32, idx: usize) -> Option<Arc<str>> {
         match (kind, self.menu_target.borrow().as_ref()) {
-            (0, Some(MenuTarget::Track(uri))) => Some(uri.clone()),
+            (0 | 3, Some(MenuTarget::Track(uri))) => Some(uri.clone()),
             (1, Some(MenuTarget::Result(id))) => get::GET.with(|g| g.borrow().as_ref().and_then(|g| g.uri_of_id(id))),
             (_, Some(_)) => None,
             (0, None) => self.model.get(idx).map(|t| t.uri.clone()),
@@ -170,7 +171,11 @@ impl Browser {
                 let Some(uri) = idx.and_then(|i| self.menu_track_uri(0, i)) else { return };
                 send(self.play_command(&uri));
             }
-            (0 | 1, "next") | (0 | 1, "queue") => {
+            (3, "play") => {
+                let Some(uri) = idx.and_then(|i| self.menu_track_uri(3, i)) else { return };
+                send(Command::Jump(uri));
+            }
+            (0 | 1 | 3, "next") | (0 | 1 | 3, "queue") => {
                 let Some(uri) = idx.and_then(|i| self.menu_track_uri(kind, i)) else { return };
                 if action == "next" {
                     send(Command::Enqueue { uri, place: Place::Next });
@@ -180,7 +185,7 @@ impl Browser {
                     self.toast("Added to queue");
                 }
             }
-            (0 | 1, "add") => {
+            (0 | 1 | 3, "add") => {
                 let Some(uri) = idx.and_then(|i| self.menu_track_uri(kind, i)) else { return };
                 let Some(id) = usize::try_from(arg).ok().and_then(|a| self.playlist_id_at(a)) else { return };
                 let name = library.playlists().get(&id).map(|p| p.name).unwrap_or_default();
@@ -201,7 +206,7 @@ impl Browser {
                     w.set_confirm_open(true);
                 }
             }
-            (0 | 1, "new") => {
+            (0 | 1 | 3, "new") => {
                 let track = idx.and_then(|i| self.menu_track_uri(kind, i));
                 self.ask_name(Pending::New { track }, "New playlist", "", None);
             }

@@ -3,7 +3,13 @@
 //! Phase 3: the shared app (core, library, player, UI) on a phone, with search and
 //! downloads through the in-process providers. There is no yt-dlp, ffmpeg or curl on iOS,
 //! so `meowtify_provider::native_providers` supplies YouTube, SoundCloud and Audius.
-//! Left out on purpose: Discord, deep links, the single-instance socket, self-update.
+//! Phase 4: background audio, lock screen and car controls, and `meowtify://` links (`native`).
+//! Left out on purpose: Discord, the single-instance socket, self-update.
+
+#[cfg(target_os = "ios")]
+mod native;
+#[cfg(target_os = "ios")]
+mod speech;
 
 #[cfg(target_os = "ios")]
 mod app {
@@ -25,6 +31,8 @@ mod app {
     }
 
     pub fn main() {
+        // Before anything can make a sound: keep playing with the screen locked.
+        crate::native::audio_session();
         let renderer = if cfg!(feature = "software") { "software" } else { "skia" };
         if let Err(e) = slint::BackendSelector::new()
             .backend_name("winit".to_string())
@@ -60,6 +68,9 @@ mod app {
         let (handle, commands) = AppHandle::new(32, 64);
         let events = handle.subscribe();
         let sender = handle.event_sender();
+        // Lock screen buttons, interruptions, and links from Siri Shortcuts.
+        let (links_tx, links_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        crate::native::init(handle.clone(), rt_handle.clone(), links_tx);
         std::thread::spawn(move || rt.block_on(run(engine, commands, sender)));
 
         // Local playback moves on its own (progress, next track), so ask for its state every second.
@@ -88,7 +99,11 @@ mod app {
             yt_dlp: None,
             discord: None,
             autoplay: autoplay_control,
-            open_links: None,
+            open_links: Some(links_rx),
+            dictation: Some(meowtify_ui::Dictation {
+                start: Box::new(|on_text| crate::speech::dictate(on_text)),
+                stop: Box::new(crate::speech::stop_dictation),
+            }),
             settings,
         };
         let result = meowtify_ui::run(handle, services, events, rt_handle);

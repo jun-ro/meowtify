@@ -9,9 +9,10 @@
 //! Every response is read in small pieces; nothing here ever holds a whole song in
 //! memory. `Connection: close` keeps the parser simple: one request, one connection.
 
+use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -29,6 +30,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_HEAD: usize = 64 * 1024;
 const MAX_REDIRECTS: usize = 6;
+/// An idle connection is reused for this long before a fresh one is opened.
+const POOL_IDLE: Duration = Duration::from_secs(45);
+/// At most this many idle connections per host, and in total.
+const POOL_PER_HOST: usize = 4;
+const POOL_TOTAL: usize = 16;
+/// How many times a transient failure is retried (two retries: three tries).
+const RETRIES: u32 = 2;
 
 /// A browser user agent. Some endpoints answer differently (or not at all) without one.
 pub(crate) const DESKTOP_UA: &str =
@@ -208,26 +216,122 @@ impl<'a> Request<'a> {
     }
 }
 
-/// Sends `request` and follows redirects. The body is not read yet.
+/// The identity of a pooled connection: the endpoint plus the proxy it went through.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct PoolKey {
+    https: bool,
+    host: String,
+    port: u16,
+    proxy: Option<String>,
+}
+
+impl PoolKey {
+    fn new(url: &Url, proxy: Option<&str>) -> PoolKey {
+        PoolKey { https: url.https, host: url.host.clone(), port: url.port, proxy: proxy.map(str::to_string) }
+    }
+}
+
+struct Idle {
+    stream: Box<dyn Stream>,
+    since: Instant,
+}
+
+fn pool() -> &'static Mutex<HashMap<PoolKey, Vec<Idle>>> {
+    static POOL: OnceLock<Mutex<HashMap<PoolKey, Vec<Idle>>>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Takes the newest idle connection that is still young enough.
+fn pool_take(key: &PoolKey) -> Option<Box<dyn Stream>> {
+    let mut map = pool().lock().unwrap();
+    let list = map.get_mut(key)?;
+    while let Some(idle) = list.pop() {
+        if idle.since.elapsed() <= POOL_IDLE {
+            return Some(idle.stream);
+        }
+    }
+    map.remove(key);
+    None
+}
+
+/// Keeps a connection that finished its answer cleanly.
+fn pool_put(key: PoolKey, stream: Box<dyn Stream>) {
+    let mut map = pool().lock().unwrap();
+    // Drop connections that sat idle too long, so sockets do not pile up.
+    map.retain(|_, list| {
+        list.retain(|idle| idle.since.elapsed() <= POOL_IDLE);
+        !list.is_empty()
+    });
+    let total: usize = map.values().map(Vec::len).sum();
+    if total >= POOL_TOTAL {
+        return;
+    }
+    let list = map.entry(key).or_default();
+    if list.len() < POOL_PER_HOST {
+        list.push(Idle { stream, since: Instant::now() });
+    }
+}
+
+/// Sends `request`, following redirects and retrying a transient failure.
 pub(crate) async fn send(request: Request<'_>) -> Result<Response> {
+    let proxy = crate::net::proxy();
+    let mut tries = 0;
+    loop {
+        match send_once(&request, proxy.clone()).await {
+            Ok(answer) if answer.status >= 500 && tries < RETRIES => {
+                drop(answer);
+                tries += 1;
+                tokio::time::sleep(backoff(tries)).await;
+            }
+            Ok(answer) => return Ok(answer),
+            Err(e) if tries < RETRIES && transient(&e) => {
+                tries += 1;
+                tokio::time::sleep(backoff(tries)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn backoff(tries: u32) -> Duration {
+    Duration::from_millis(400 * (1u64 << tries.saturating_sub(1)))
+}
+
+/// Whether another try has a chance: a broken connection or a timeout, not a refusal.
+pub(crate) fn transient(e: &ProviderError) -> bool {
+    match e {
+        ProviderError::Io(_) => true,
+        ProviderError::Tool(m) => {
+            m.contains("timed out") || m.contains("took too long") || m.contains("closed the connection") || m.contains("connection ended")
+        }
+        _ => false,
+    }
+}
+
+/// One attempt, which may follow redirects. The body is not read yet.
+async fn send_once(request: &Request<'_>, proxy: Option<String>) -> Result<Response> {
     let mut url = Url::parse(request.url)?;
     let method = request.method;
     let body = request.body;
     for _ in 0..=MAX_REDIRECTS {
-        let mut headers = request.headers.clone();
-        let mut stream = connect(&url).await?;
-        let head = build_head(method, &url, &headers, body);
-        if tokio::time::timeout(HEAD_TIMEOUT, stream.write_all(head.as_bytes())).await.is_err() {
-            return Err(ProviderError::Tool("the request timed out".into()));
-        }
-        if let Some(body) = body {
-            if tokio::time::timeout(HEAD_TIMEOUT, stream.write_all(body)).await.is_err() {
-                return Err(ProviderError::Tool("the request timed out".into()));
+        // A reused connection may have been closed while idle; one fresh retry is enough.
+        let (status, reply, stream, leftover) = loop {
+            let (mut stream, reused) = connect_for(&url, proxy.as_deref()).await?;
+            let headers = request.headers.clone();
+            let head = build_head(method, &url, &headers, body);
+            if let Err(e) = write_request(&mut stream, head.as_bytes(), body).await {
+                if reused {
+                    continue;
+                }
+                return Err(e);
             }
-        }
-        let (status, reply, leftover) = match tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut stream)).await {
-            Ok(r) => r?,
-            Err(_) => return Err(ProviderError::Tool("the server took too long to answer".into())),
+            match tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut stream)).await {
+                Ok(Ok((status, reply, leftover))) => break (status, reply, stream, leftover),
+                Ok(Err(_)) if reused => continue,
+                Ok(Err(e)) => return Err(e),
+                Err(_) if reused => continue,
+                Err(_) => return Err(ProviderError::Tool("the server took too long to answer".into())),
+            }
         };
         if matches!(status, 301 | 302 | 303 | 307 | 308) {
             let Some(location) = reply.iter().find(|(k, _)| k.eq_ignore_ascii_case("location")).map(|(_, v)| v.clone()) else {
@@ -235,13 +339,39 @@ pub(crate) async fn send(request: Request<'_>) -> Result<Response> {
             };
             let next = resolve_location(&url, &location)?;
             url = Url::parse(&next)?;
-            headers.clear();
             continue;
         }
         let mode = body_mode(&reply);
-        return Ok(Response { status, headers: reply, body: Body::new(stream, mode, leftover) });
+        let reusable = !matches!(mode, Mode::Eof) && !connection_close(&reply);
+        let stream: Box<dyn Stream> = if leftover.is_empty() { stream } else { Box::new(Prefixed::new(leftover, stream)) };
+        let key = PoolKey::new(&url, proxy.as_deref());
+        return Ok(Response { status, headers: reply, body: Body::new(stream, mode, key, reusable) });
     }
     Err(ProviderError::Tool("too many redirects".into()))
+}
+
+/// Writes the head and the body, reporting a real write error instead of ignoring it.
+async fn write_request(stream: &mut Box<dyn Stream>, head: &[u8], body: Option<&[u8]>) -> Result<()> {
+    match tokio::time::timeout(HEAD_TIMEOUT, stream.write_all(head)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(ProviderError::Io(e.to_string())),
+        Err(_) => return Err(ProviderError::Tool("the request timed out".into())),
+    }
+    if let Some(body) = body {
+        match tokio::time::timeout(HEAD_TIMEOUT, stream.write_all(body)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(ProviderError::Io(e.to_string())),
+            Err(_) => return Err(ProviderError::Tool("the request timed out".into())),
+        }
+    }
+    Ok(())
+}
+
+fn connection_close(headers: &[(String, String)]) -> bool {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("connection"))
+        .is_some_and(|(_, v)| v.to_ascii_lowercase().contains("close"))
 }
 
 /// GET with extra headers, following redirects.
@@ -316,7 +446,7 @@ pub(crate) fn status_error(what: &str, status: u16, body: &[u8]) -> ProviderErro
 
 fn build_head(method: &str, url: &Url, headers: &[(String, String)], body: Option<&[u8]>) -> String {
     let mut head = format!("{method} {} HTTP/1.1\r\nHost: {}\r\n", url.path, url.authority());
-    head.push_str("Accept-Encoding: identity\r\nConnection: close\r\n");
+    head.push_str("Accept-Encoding: identity\r\nConnection: keep-alive\r\n");
     if body.is_some() {
         head.push_str(&format!("Content-Length: {}\r\n", body.map(|b| b.len()).unwrap_or(0)));
     }
@@ -339,24 +469,31 @@ fn build_head(method: &str, url: &Url, headers: &[(String, String)], body: Optio
     head
 }
 
-/// Reads the status line and headers, and returns the bytes that already belong to the body.
+/// Reads the status line and headers in one buffered read, and returns any body bytes
+/// that arrived with them.
 async fn read_head(stream: &mut Box<dyn Stream>) -> Result<(u16, Vec<(String, String)>, Vec<u8>)> {
-    let mut buf = Vec::with_capacity(4096);
-    let mut byte = [0u8; 1];
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 4096];
     loop {
-        let n = stream.read(&mut byte).await.map_err(|e| ProviderError::Io(e.to_string()))?;
+        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4) {
+            let text = String::from_utf8_lossy(&buf[..end]);
+            let leftover = buf[end..].to_vec();
+            let (status, headers) = parse_head(&text)?;
+            return Ok((status, headers, leftover));
+        }
+        if buf.len() >= MAX_HEAD + 4 {
+            return Err(ProviderError::Parse("the server sent oversized headers".into()));
+        }
+        let want = (MAX_HEAD + 4 - buf.len()).min(chunk.len());
+        let n = stream.read(&mut chunk[..want]).await.map_err(|e| ProviderError::Io(e.to_string()))?;
         if n == 0 {
             return Err(ProviderError::Tool("the server closed the connection before answering".into()));
         }
-        buf.push(byte[0]);
-        if buf.len() >= 4 && buf.ends_with(b"\r\n\r\n") {
-            break;
-        }
-        if buf.len() > MAX_HEAD {
-            return Err(ProviderError::Parse("the server sent oversized headers".into()));
-        }
+        buf.extend_from_slice(&chunk[..n]);
     }
-    let text = String::from_utf8_lossy(&buf);
+}
+
+fn parse_head(text: &str) -> Result<(u16, Vec<(String, String)>)> {
     let mut lines = text.split("\r\n");
     let status_line = lines.next().unwrap_or("");
     let status: u16 = status_line
@@ -373,7 +510,44 @@ async fn read_head(stream: &mut Box<dyn Stream>) -> Result<(u16, Vec<(String, St
             headers.push((name.trim().to_string(), value.trim().to_string()));
         }
     }
-    Ok((status, headers, Vec::new()))
+    Ok((status, headers))
+}
+
+/// A stream whose first `head.len()` bytes come from the end of the header read.
+struct Prefixed {
+    head: Vec<u8>,
+    at: usize,
+    inner: Box<dyn Stream>,
+}
+
+impl Prefixed {
+    fn new(head: Vec<u8>, inner: Box<dyn Stream>) -> Prefixed {
+        Prefixed { head, at: 0, inner }
+    }
+}
+
+impl AsyncRead for Prefixed {
+    fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<io::Result<()>> {
+        if self.at < self.head.len() {
+            let n = (self.head.len() - self.at).min(buf.remaining());
+            buf.put_slice(&self.head[self.at..self.at + n]);
+            self.at += n;
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for Prefixed {
+    fn poll_write(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &[u8]) -> std::task::Poll<io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 fn body_mode(headers: &[(String, String)]) -> Mode {
@@ -387,6 +561,7 @@ fn body_mode(headers: &[(String, String)]) -> Mode {
     Mode::Eof
 }
 
+#[derive(Clone, Copy)]
 enum Mode {
     Length(u64),
     Chunked { remaining: u64, done: bool },
@@ -394,78 +569,108 @@ enum Mode {
 }
 
 struct Body {
-    stream: Box<dyn Stream>,
+    stream: Option<Box<dyn Stream>>,
     mode: Mode,
-    prefix: Vec<u8>,
-    prefix_at: usize,
+    key: Option<PoolKey>,
 }
 
 impl Body {
-    fn new(stream: Box<dyn Stream>, mode: Mode, prefix: Vec<u8>) -> Body {
-        Body { stream, mode, prefix, prefix_at: 0 }
+    fn new(stream: Box<dyn Stream>, mode: Mode, key: PoolKey, reusable: bool) -> Body {
+        Body { stream: Some(stream), mode, key: if reusable { Some(key) } else { None } }
+    }
+
+    /// Gives a fully read connection back to the pool.
+    fn release(&mut self) {
+        if let (Some(stream), Some(key)) = (self.stream.take(), self.key.take()) {
+            pool_put(key, stream);
+        }
     }
 
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
-        if self.prefix_at < self.prefix.len() {
-            let n = (self.prefix.len() - self.prefix_at).min(buf.len());
-            buf[..n].copy_from_slice(&self.prefix[self.prefix_at..self.prefix_at + n]);
-            self.prefix_at += n;
-            return Ok(n);
-        }
-        match &mut self.mode {
+        let mode = self.mode;
+        let mut finished = false;
+        let result = match mode {
             Mode::Length(left) => {
-                if *left == 0 {
-                    return Ok(0);
+                if left == 0 {
+                    finished = true;
+                    Ok(0)
+                } else {
+                    let want = left.min(buf.len() as u64) as usize;
+                    let Some(stream) = self.stream.as_mut() else { return Ok(0) };
+                    let n = stream.read(&mut buf[..want]).await.map_err(|e| ProviderError::Io(e.to_string()))?;
+                    if n == 0 {
+                        return Err(ProviderError::Tool("the connection ended before the file did".into()));
+                    }
+                    let left = left - n as u64;
+                    self.mode = Mode::Length(left);
+                    if left == 0 {
+                        finished = true;
+                    }
+                    Ok(n)
                 }
-                let want = (*left).min(buf.len() as u64) as usize;
-                let n = self.stream.read(&mut buf[..want]).await.map_err(|e| ProviderError::Io(e.to_string()))?;
+            }
+            Mode::Eof => {
+                let Some(stream) = self.stream.as_mut() else { return Ok(0) };
+                let n = stream.read(buf).await.map_err(|e| ProviderError::Io(e.to_string()))?;
                 if n == 0 {
-                    return Err(ProviderError::Tool("the connection ended before the file did".into()));
+                    finished = true;
                 }
-                *left -= n as u64;
                 Ok(n)
             }
-            Mode::Eof => self.stream.read(buf).await.map_err(|e| ProviderError::Io(e.to_string())),
-            Mode::Chunked { remaining, done } => {
-                if *done {
-                    return Ok(0);
-                }
-                if *remaining == 0 {
-                    let line = read_line(&mut self.stream, 64).await?;
-                    let size = parse_chunk_size(&line)
-                        .ok_or_else(|| ProviderError::Parse(format!("bad chunk size: {line:?}")))?;
-                    if size == 0 {
-                        // Trailers, then a blank line.
-                        loop {
-                            let line = read_line(&mut self.stream, MAX_HEAD).await?;
-                            if line.is_empty() {
-                                break;
+            Mode::Chunked { mut remaining, done } => {
+                if done {
+                    finished = true;
+                    Ok(0)
+                } else {
+                    if remaining == 0 {
+                        let Some(stream) = self.stream.as_mut() else { return Ok(0) };
+                        let line = read_line(stream, 64).await?;
+                        let size = parse_chunk_size(&line)
+                            .ok_or_else(|| ProviderError::Parse(format!("bad chunk size: {line:?}")))?;
+                        if size == 0 {
+                            {
+                                let Some(stream) = self.stream.as_mut() else { return Ok(0) };
+                                // Trailers, then a blank line.
+                                loop {
+                                    let line = read_line(stream, MAX_HEAD).await?;
+                                    if line.is_empty() {
+                                        break;
+                                    }
+                                }
                             }
+                            self.mode = Mode::Chunked { remaining: 0, done: true };
+                            self.release();
+                            return Ok(0);
                         }
-                        *done = true;
-                        return Ok(0);
+                        remaining = size as u64;
                     }
-                    *remaining = size as u64;
-                }
-                let want = (*remaining).min(buf.len() as u64) as usize;
-                let n = self.stream.read(&mut buf[..want]).await.map_err(|e| ProviderError::Io(e.to_string()))?;
-                if n == 0 {
-                    return Err(ProviderError::Tool("the connection ended inside a chunk".into()));
-                }
-                *remaining -= n as u64;
-                if *remaining == 0 {
-                    let mut crlf = [0u8; 2];
-                    self.stream.read_exact(&mut crlf).await.map_err(|e| ProviderError::Io(e.to_string()))?;
-                    if &crlf != b"\r\n" {
-                        return Err(ProviderError::Parse("a chunk did not end with a line break".into()));
+                    let want = remaining.min(buf.len() as u64) as usize;
+                    let Some(stream) = self.stream.as_mut() else { return Ok(0) };
+                    let n = stream.read(&mut buf[..want]).await.map_err(|e| ProviderError::Io(e.to_string()))?;
+                    if n == 0 {
+                        return Err(ProviderError::Tool("the connection ended inside a chunk".into()));
                     }
+                    remaining -= n as u64;
+                    if remaining == 0 {
+                        let Some(stream) = self.stream.as_mut() else { return Ok(0) };
+                        let mut crlf = [0u8; 2];
+                        stream.read_exact(&mut crlf).await.map_err(|e| ProviderError::Io(e.to_string()))?;
+                        if &crlf != b"\r\n" {
+                            return Err(ProviderError::Parse("a chunk did not end with a line break".into()));
+                        }
+                    }
+                    self.mode = Mode::Chunked { remaining, done };
+                    Ok(n)
                 }
-                Ok(n)
             }
+        };
+        if finished {
+            self.release();
         }
+        result
     }
 }
 
@@ -517,9 +722,18 @@ fn tls_config() -> &'static Arc<ClientConfig> {
     })
 }
 
+/// Reuses an idle connection for this endpoint, or opens a new one.
+async fn connect_for(url: &Url, proxy: Option<&str>) -> Result<(Box<dyn Stream>, bool)> {
+    let key = PoolKey::new(url, proxy);
+    if let Some(stream) = pool_take(&key) {
+        return Ok((stream, true));
+    }
+    Ok((connect_new(url, proxy).await?, false))
+}
+
 /// Opens a connection to the URL, through the saved proxy when one is set.
-async fn connect(url: &Url) -> Result<Box<dyn Stream>> {
-    let proxy = crate::net::proxy().map(|p| Proxy::parse(&p)).transpose()?;
+async fn connect_new(url: &Url, proxy: Option<&str>) -> Result<Box<dyn Stream>> {
+    let proxy = proxy.map(Proxy::parse).transpose()?;
     match proxy {
         None => {
             let tcp = tcp_connect(&url.host, url.port).await?;
@@ -855,9 +1069,129 @@ mod tests {
         let headers = vec![("X-Ok".to_string(), "1".to_string()), ("X-Bad".to_string(), "a\r\nEvil: 1".to_string())];
         let head = build_head("GET", &url, &headers, None);
         assert!(head.starts_with("GET /p HTTP/1.1\r\nHost: h\r\n"));
+        assert!(head.contains("Connection: keep-alive\r\n"));
         assert!(head.contains("X-Ok: 1\r\n"));
         assert!(!head.contains("Evil"));
         assert!(head.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn a_server_close_is_respected() {
+        assert!(connection_close(&[("Connection".to_string(), "close".to_string())]));
+        assert!(!connection_close(&[("Connection".to_string(), "keep-alive".to_string())]));
+        assert!(!connection_close(&[]));
+    }
+
+    #[test]
+    fn retries_only_breakages_and_timeouts() {
+        assert!(transient(&ProviderError::Io("reset by peer".into())));
+        assert!(transient(&ProviderError::Tool("the request timed out".into())));
+        assert!(transient(&ProviderError::Tool("the connection ended inside the body".into())));
+        assert!(!transient(&ProviderError::Tool("the server redirected without a location".into())));
+        assert!(!transient(&ProviderError::Invalid("bad link".into())));
+    }
+
+    #[tokio::test]
+    async fn reads_headers_and_hands_back_the_body_start() {
+        let (client, mut server) = tokio::io::duplex(1024);
+        tokio::spawn(async move {
+            server.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+        let mut stream: Box<dyn Stream> = Box::new(client);
+        let (status, headers, leftover) = read_head(&mut stream).await.unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(leftover, b"abc");
+        assert!(headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("content-length") && v == "3"));
+    }
+
+    #[tokio::test]
+    async fn a_finished_body_gives_its_connection_to_the_pool() {
+        let key = PoolKey { https: false, host: "body-pool-test".into(), port: 1, proxy: None };
+        let (client, mut server) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            server.write_all(b"abc").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+        let mut body = Body::new(Box::new(client), Mode::Length(3), key.clone(), true);
+        let mut buf = [0u8; 8];
+        assert_eq!(body.read(&mut buf).await.unwrap(), 3);
+        assert!(pool_take(&key).is_some(), "the connection was not pooled");
+    }
+
+    #[tokio::test]
+    async fn a_closed_body_is_not_pooled() {
+        let key = PoolKey { https: false, host: "body-no-pool-test".into(), port: 1, proxy: None };
+        let (client, mut server) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            server.write_all(b"abc").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+        let mut body = Body::new(Box::new(client), Mode::Length(3), key.clone(), false);
+        let mut buf = [0u8; 8];
+        assert_eq!(body.read(&mut buf).await.unwrap(), 3);
+        assert!(pool_take(&key).is_none(), "a non-reusable connection was pooled");
+    }
+
+    #[tokio::test]
+    async fn a_prefixed_stream_serves_the_header_leftover_first() {
+        let (client, mut server) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            server.write_all(b"tail").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+        let mut stream: Box<dyn Stream> = Box::new(Prefixed::new(b"head".to_vec(), Box::new(client)));
+        let mut got = Vec::new();
+        let mut buf = [0u8; 2];
+        while got.len() < 8 {
+            let n = stream.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(got, b"headtail");
+    }
+
+    #[tokio::test]
+    async fn reuses_one_connection_for_two_answers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = accepted.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            count.fetch_add(1, Ordering::SeqCst);
+            for body in [b"one".as_slice(), b"two".as_slice()] {
+                let mut buf = Vec::new();
+                let mut byte = [0u8; 1];
+                loop {
+                    let n = socket.read(&mut byte).await.unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    buf.push(byte[0]);
+                    if buf.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                socket.write_all(head.as_bytes()).await.unwrap();
+                socket.write_all(body).await.unwrap();
+            }
+            if tokio::time::timeout(Duration::from_millis(300), listener.accept()).await.is_ok() {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let url = format!("http://{addr}/x");
+        for expected in [b"one".as_slice(), b"two".as_slice()] {
+            let mut answer = send_once(&Request::get(&url), None).await.unwrap();
+            assert_eq!(answer.status, 200);
+            assert_eq!(answer.bytes(64).await.unwrap(), expected);
+        }
+        server.await.unwrap();
+        assert_eq!(accepted.load(Ordering::SeqCst), 1, "the second request opened a new connection");
     }
 
     #[test]
