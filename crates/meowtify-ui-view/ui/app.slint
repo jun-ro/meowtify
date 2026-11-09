@@ -2482,7 +2482,7 @@ export component MainWindow inherits Window {
             padding-left: 16px;
             padding-right: 16px;
             // Room for the song tab that sits over the bottom of the sheet.
-            padding-bottom: 78px;
+            padding-bottom: 84px;
             spacing: 4px;
             // Dragging the header down closes the sheet.
             Rectangle {
@@ -2566,16 +2566,16 @@ export component MainWindow inherits Window {
     // player panel. Tap it for the lyrics; drag it up for the queue.
     if root.compact: Rectangle {
         x: root.tab-x;
-        y: root.height - root.bar-h - 10px;
+        y: root.height - root.bar-h - 16px;
         width: root.tab-w;
-        height: 75px;
+        height: 81px;
         Path {
             width: parent.width;
             height: parent.height;
             viewbox-width: root.tab-w / 1px;
-            viewbox-height: 75;
+            viewbox-height: 81;
             // An S-curve up from the panel's edge, the flat top, and the same curve back down.
-            commands: "M 0 75 C 20 75 24 2 44 2 L \{root.tab-w / 1px - 44} 2 C \{root.tab-w / 1px - 24} 2 \{root.tab-w / 1px - 20} 75 \{root.tab-w / 1px} 75";
+            commands: "M 0 81 C 20 81 24 2 44 2 L \{root.tab-w / 1px - 44} 2 C \{root.tab-w / 1px - 24} 2 \{root.tab-w / 1px - 20} 81 \{root.tab-w / 1px} 81";
             fill: Theme.panel;
             stroke: Theme.raised;
             stroke-width: 1px;
@@ -2596,7 +2596,7 @@ export component MainWindow inherits Window {
         }
         Rectangle {
             x: 0;
-            y: 18px;
+            y: 24px;
             width: parent.width;
             height: 57px;
             HorizontalLayout {
