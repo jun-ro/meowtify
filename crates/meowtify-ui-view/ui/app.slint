@@ -107,7 +107,6 @@ component Stepper inherits HorizontalLayout {
     callback changed(int);
     height: 36px;
     spacing: 8px;
-    alignment: start;
     Rectangle {
         width: 30px;
         height: 28px;
@@ -133,7 +132,7 @@ component Stepper inherits HorizontalLayout {
             clicked => { if (root.value < root.max) { root.value += 1; root.changed(root.value); } }
         }
     }
-    Label { text: root.label; color: Theme.text; font-size: 16px; vertical-alignment: center; }
+    Label { text: root.label; color: Theme.text; font-size: 16px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; preferred-width: 0px; }
 }
 
 /// Round toggle with a drawn icon: "shuffle" or "repeat". Lit in accent while on.
@@ -209,6 +208,44 @@ component IconButton inherits Rectangle {
     }
 }
 
+/// The sidebar's update button: an arrow down into a tray, in accent orange. While an update
+/// installs, a fill grows from the left like a download chip's.
+component UpdateButton inherits Rectangle {
+    in property <float> progress;
+    in property <bool> active;
+    callback clicked();
+    width: 22px;
+    height: 22px;
+    border-radius: 5px;
+    clip: true;
+    background: root.active ? Theme.raised : transparent;
+    animate background { duration: 200ms; }
+    border-width: root.active ? 1px : 0px;
+    border-color: Theme.accent;
+    Rectangle {
+        x: 0;
+        width: parent.width * (root.active ? root.progress : 0);
+        height: parent.height;
+        background: Theme.accent-dim;
+        animate width { duration: 200ms; }
+    }
+    Path {
+        width: 14px;
+        height: 14px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 14;
+        viewbox-height: 14;
+        commands: "M 7 0.5 L 7 8.5 M 3.6 5.2 L 7 8.6 L 10.4 5.2 M 1 10.5 L 1 12.2 Q 1 13 1.8 13 L 12.2 13 Q 13 13 13 12.2 L 13 10.5";
+        stroke: ta.has-hover ? Theme.accent-hot : Theme.accent;
+        animate stroke { duration: 120ms; }
+        stroke-width: 1.6px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+    ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.clicked(); } }
+}
+
 component Pill inherits Rectangle {
     in property <string> text;
     in property <bool> primary: true;
@@ -233,6 +270,30 @@ component Pill inherits Rectangle {
             vertical-alignment: center;
         }
     }
+}
+
+/// A setting row: its name with a pill that cycles through short choices, and a hint below.
+/// The name wraps and the pill keeps its size, so a narrow window never runs text past it.
+component ChoiceRow inherits VerticalLayout {
+    in property <string> label;
+    in property <string> hint;
+    in property <string> value;
+    callback cycle();
+    spacing: 2px;
+    alignment: start;
+    HorizontalLayout {
+        spacing: 12px;
+        Label {
+            text: root.label;
+            color: Theme.text;
+            font-size: 16px;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+        }
+        Pill { text: root.value; primary: false; clicked => { root.cycle(); } }
+    }
+    Label { text: root.hint; color: Theme.muted; font-size: 16px; wrap: word-wrap; }
 }
 
 /// A single-line text box with a hint, for the Jam page.
@@ -284,6 +345,350 @@ component PermChip inherits Rectangle {
         font-size: 16px;
         horizontal-alignment: center;
         vertical-alignment: center;
+    }
+}
+
+/// Touch feedback for a phone Settings control: a white wash that fades in fast while the control
+/// is held and out slowly after it is let go. One shape, used by every tappable control there.
+component TouchFlash inherits Rectangle {
+    in property <bool> pressed;
+    /// Corner radius of the wash, so it follows the control it covers.
+    in property <length> radius: 0px;
+    /// The top and bottom corners default to `radius`; the Advanced row overrides the top two with
+    /// the card's radius, so the wash stays inside the card edge.
+    in property <length> top-radius: root.radius;
+    in property <length> bottom-radius: root.radius;
+    in property <color> tint: #ffffff;
+    /// 0.2 is about 20% white.
+    in property <float> strength: 0.2;
+    width: 100%;
+    height: 100%;
+    border-top-left-radius: root.top-radius;
+    border-top-right-radius: root.top-radius;
+    border-bottom-left-radius: root.bottom-radius;
+    border-bottom-right-radius: root.bottom-radius;
+    // White at zero alpha rather than `transparent`: a fade through transparent would pass through
+    // grey, and the wash would not read on the dark card.
+    // `lit` holds the wash for a moment after press, so even an instant tap (a mouse click, a quick
+    // finger) is seen before it fades; the fade-out then starts from the full level.
+    property <bool> lit;
+    changed pressed => { if (self.pressed) { self.lit = true; } }
+    hold := Timer {
+        interval: 110ms;
+        running: root.lit && !root.pressed;
+        triggered => { root.lit = false; }
+    }
+    background: root.tint.with-alpha((root.pressed || root.lit) ? root.strength : 0);
+    // Fast in, slow out.
+    animate background { duration: (root.pressed || root.lit) ? 70ms : 300ms; easing: ease-out; }
+}
+
+// Phone Settings. A card of rows, each row a label (and one short hint) with its control on
+// the right. Only the compact Settings page uses these; the wide page keeps its old layout.
+
+/// A section label and the rounded card under it.
+component SettingsSection inherits VerticalLayout {
+    in property <string> title;
+    spacing: 6px;
+    alignment: start;
+    Label {
+        text: root.title;
+        color: Theme.muted;
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        height: 28px;
+        vertical-alignment: bottom;
+    }
+    Rectangle {
+        border-radius: 14px;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: #222228;
+        VerticalLayout {
+            // Spelled out so rows added later (the Advanced card) are laid out with the card's
+            // width at once; a nested layout alone can hand a new child its preferred width
+            // until the next scroll.
+            width: root.width;
+            alignment: start;
+            @children
+        }
+    }
+}
+
+/// One setting row: text on the left, the control (its children) on the right, both centred.
+/// Rows in a card are split by a 1px line, so every row but the first sets `divider: false`.
+component SettingsRow inherits Rectangle {
+    in property <string> label;
+    /// A short muted line under the label. "" hides it.
+    in property <string> hint;
+    /// A second line under the label in the accent colour, such as "Signed in".
+    in property <string> accent-hint;
+    /// Draw the folder path as one clipped line, showing its tail.
+    in property <bool> path-hint: false;
+    /// Width of the control slot on the right, so every row's control lines up.
+    in property <length> control-w: 92px;
+    in property <bool> divider: true;
+    /// Wash the whole row while it is pressed (the Advanced header).
+    in property <bool> flash: false;
+    /// The card's corner radius, so a row flush with the card edge keeps it.
+    in property <length> flash-top-radius: 0px;
+    callback clicked();
+    background: transparent;
+    Rectangle {
+        y: 0;
+        width: parent.width;
+        height: 1px;
+        background: Theme.raised;
+        visible: root.divider;
+    }
+    // Behind the control, so a pill or toggle takes its own clicks first.
+    ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.clicked(); } }
+    HorizontalLayout {
+        // The minimum lives on the layout, not the row: a row's own min-height would make its
+        // min and preferred sizes differ, and a Flickable's content height is built from min.
+        min-height: 64px;
+        padding-left: 14px;
+        padding-right: 14px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            // The width is spelled out, not left to the stretch factor: a word-wrapped hint is
+            // measured with whatever width its column has at the time, and a column that is
+            // solved later measured its hint on one line. The row then rendered two lines and
+            // spilled out of the card, because the card's height comes from that measurement.
+            width: max(0px, root.width - 40px - root.control-w);
+            horizontal-stretch: 0;
+            spacing: 2px;
+            Label { text: root.label; color: Theme.text; font-size: 16px; overflow: elide; }
+            if root.accent-hint != "": Label {
+                text: root.accent-hint;
+                color: Theme.accent;
+                font-size: 14px;
+                wrap: word-wrap;
+            }
+            // A path too long for the row shows its tail, like "…\Meowtify\songs".
+            if root.path-hint: Rectangle {
+                height: 18px;
+                inner := Rectangle {
+                    x: 12px;
+                    width: parent.width - 12px;
+                    height: parent.height;
+                    clip: true;
+                    path-text := Label {
+                        width: self.preferred-width;
+                        x: min(0px, parent.width - self.width);
+                        height: parent.height;
+                        text: root.hint;
+                        color: Theme.muted;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                    }
+                }
+                // The dots sit over the left edge, and only when the path was cut there.
+                if path-text.preferred-width > inner.width: Rectangle {
+                    x: 0;
+                    width: 12px;
+                    height: parent.height;
+                    background: Theme.panel;
+                    Label { text: "\u{2026}"; color: Theme.muted; font-size: 14px; vertical-alignment: center; }
+                }
+            }
+            if !root.path-hint && root.hint != "": Label {
+                text: root.hint;
+                color: Theme.muted;
+                font-size: 14px;
+                wrap: word-wrap;
+            }
+        }
+        VerticalLayout {
+            width: root.control-w;
+            // Never let the slot take the row's spare width: an empty slot (a hidden chevron,
+            // or a row that has just appeared) reports a huge stretch and squeezes the text.
+            horizontal-stretch: 0;
+            alignment: center;
+            @children
+        }
+    }
+    // On top of the row, so the whole row flashes. The wash keeps the card's corner where the
+    // row touches its edge.
+    if root.flash: TouchFlash { top-radius: root.flash-top-radius; pressed: ta.pressed; }
+}
+
+/// A row whose control is a text box: label and hint on top, the 44px field below.
+component SettingsFieldRow inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    in property <string> placeholder;
+    in property <bool> bad: false;
+    in property <bool> divider: true;
+    in-out property <string> text;
+    callback accepted(string);
+    background: transparent;
+    Rectangle {
+        y: 0;
+        width: parent.width;
+        height: 1px;
+        background: Theme.raised;
+        visible: root.divider;
+    }
+    VerticalLayout {
+        min-height: 64px;
+        padding-left: 14px;
+        padding-right: 14px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 6px;
+        alignment: start;
+        Label { text: root.label; color: Theme.text; font-size: 16px; overflow: elide; }
+        if root.hint != "": Label {
+            text: root.hint;
+            color: root.bad ? Theme.danger : Theme.muted;
+            font-size: 14px;
+            wrap: word-wrap;
+        }
+        Rectangle {
+            height: 44px;
+            border-radius: 10px;
+            background: Theme.raised;
+            border-width: 1px;
+            border-color: root.bad ? Theme.danger : (input.has-focus ? Theme.accent : #3a3a42);
+            input := TextInput {
+                x: 12px;
+                width: parent.width - 24px;
+                height: parent.height;
+                color: Theme.text;
+                font-family: "Unifont Heavy";
+                font-size: 16px;
+                single-line: true;
+                vertical-alignment: center;
+                text <=> root.text;
+                accepted => { root.accepted(self.text); }
+            }
+            if input.text == "" && !input.has-focus: Label {
+                x: 12px;
+                width: parent.width - 24px;
+                text: root.placeholder;
+                color: Theme.muted;
+                font-size: 16px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+/// The 92x40 pill a Settings row uses as its control.
+component SettingsPill inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> busy: false;
+    callback clicked();
+    width: 92px;
+    height: 40px;
+    border-radius: 20px;
+    background: root.busy
+        ? Theme.raised
+        : (root.primary ? (ta.has-hover ? Theme.accent-hot : Theme.accent) : (ta.has-hover ? Theme.hover : Theme.raised));
+    border-width: root.primary ? 0px : 1px;
+    border-color: #3a3a42;
+    animate background { duration: 120ms; }
+    ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.clicked(); } }
+    Label {
+        x: 4px;
+        width: parent.width - 8px;
+        text: root.text;
+        color: root.busy ? Theme.muted : (root.primary ? #1a1209 : Theme.text);
+        font-size: 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    TouchFlash { radius: 20px; pressed: ta.pressed; }
+}
+
+/// The 48x28 switch a Settings row uses as its control.
+component SettingsToggle inherits Rectangle {
+    in-out property <bool> on;
+    callback toggled(bool);
+    width: 48px;
+    height: 28px;
+    border-radius: 14px;
+    background: root.on ? Theme.accent : Theme.raised;
+    animate background { duration: 160ms; }
+    Rectangle {
+        width: 20px;
+        height: 20px;
+        y: 4px;
+        x: root.on ? 24px : 4px;
+        border-radius: 10px;
+        background: root.on ? #1a1209 : Theme.muted;
+        animate x { duration: 160ms; easing: ease-out; }
+    }
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.on = !root.on; root.toggled(root.on); }
+    }
+    // A flash over the whole switch reads as the thumb lighting up as well.
+    TouchFlash { radius: 14px; pressed: ta.pressed; }
+}
+
+/// Minus, value and plus. The visible button is 32px inside a 40px touch target, so the pair
+/// sits inside the 64px row without touching the card edge.
+component SettingsStepper inherits HorizontalLayout {
+    in property <int> min: 0;
+    in property <int> max: 30;
+    in-out property <int> value;
+    callback changed(int);
+    spacing: 4px;
+    alignment: start;
+    Rectangle {
+        width: 40px;
+        height: 40px;
+        background: transparent;
+        Rectangle {
+            x: 4px;
+            y: 4px;
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            background: dec.has-hover ? Theme.hover : Theme.raised;
+            Label { text: "\u{2212}"; color: Theme.text; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+            TouchFlash { radius: 8px; pressed: dec.pressed; }
+        }
+        dec := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { if (root.value > root.min) { root.value -= 1; root.changed(root.value); } }
+        }
+    }
+    Label {
+        text: root.value;
+        color: Theme.text;
+        font-size: 16px;
+        width: 24px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        width: 40px;
+        height: 40px;
+        background: transparent;
+        Rectangle {
+            x: 4px;
+            y: 4px;
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            background: inc.has-hover ? Theme.hover : Theme.raised;
+            Label { text: "+"; color: Theme.text; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+            TouchFlash { radius: 8px; pressed: inc.pressed; }
+        }
+        inc := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { if (root.value < root.max) { root.value += 1; root.changed(root.value); } }
+        }
     }
 }
 
@@ -766,6 +1171,16 @@ export component MainWindow inherits Window {
     in-out property <string> lastfm-key: "";
     in property <string> lastfm-note;
     in property <bool> lastfm-bad: false;
+    /// Downloads: 0 = always the best copy, 1 = small on a slow link, 2 = always small.
+    in-out property <int> bitrate-mode: 0;
+    /// Whether this system can offer the in-app sign-in (Windows only).
+    in property <bool> login-supported: false;
+    /// Signed in through the in-app sign-in. The encrypted cookie file is the saved state.
+    in-out property <bool> login-signed-in: false;
+    /// The sign-in window is open; the button waits for it.
+    in-out property <bool> signing-in: false;
+    /// A line under the sign-in hint, such as how to end the session on Google too.
+    in-out property <string> login-note;
     /// The playing song sits in the autoplay cache, so it can be kept.
     in-out property <bool> now-temp: false;
     in-out property <bool> now-kept: false;
@@ -831,6 +1246,13 @@ export component MainWindow inherits Window {
     in-out property <string> update-notes;
     callback check-update();
     callback install-update();
+    /// The sidebar's update button: only on systems a release has a program for.
+    in property <bool> update-supported: false;
+    /// How far the update download has gone, 0.0 ..= 1.0.
+    in-out property <float> update-progress: 0.0;
+    /// A download is under way; the sidebar button shows it. `update-state` is 1 then as well,
+    /// but it is also 1 during a check, which must not show the button.
+    in-out property <bool> update-installing: false;
     /// First run: no music folder yet. A welcome card asks for one.
     in-out property <bool> onboarding-open: false;
     in property <[ResultRow]> results;
@@ -862,6 +1284,8 @@ export component MainWindow inherits Window {
     callback set-autoplay-ahead(int);
     callback set-autoplay-behind(int);
     callback set-lastfm-key(string);
+    callback set-bitrate-mode(int);
+    callback sign-in-out();
     callback keep-now();
     callback dislike-now();
     callback set-proxy(string);
@@ -1186,13 +1610,27 @@ export component MainWindow inherits Window {
                         active: root.view == 1;
                         clicked => { root.view = 1; }
                     }
-                    Label {
-                        text: root.app-version;
-                        color: Theme.muted;
-                        font-size: 12px;
-                        height: 18px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    // The update button appears only when a release is ready, and shows the
+                    // download as it grows. With it hidden the version label stays centred.
+                    HorizontalLayout {
+                        height: 24px;
+                        alignment: center;
+                        spacing: 0px;
+                        UpdateButton {
+                            visible: root.update-supported && (root.update-state == 2 || root.update-installing);
+                            width: self.visible ? 22px : 0px;
+                            progress: root.update-progress;
+                            active: root.update-installing;
+                            clicked => { root.install-update(); }
+                        }
+                        Label {
+                            text: root.app-version;
+                            color: Theme.muted;
+                            font-size: 12px;
+                            horizontal-stretch: 1;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }
@@ -1773,7 +2211,7 @@ export component MainWindow inherits Window {
                 }
 
                 // Settings pane (covers the list while open).
-                Rectangle {
+                settings-pane := Rectangle {
                     opacity: root.view == 1 ? 1 : 0;
                     animate opacity { duration: 160ms; easing: ease-out; }
                     visible: root.view == 1 || self.opacity > 0.01;
@@ -1781,8 +2219,264 @@ export component MainWindow inherits Window {
                     height: 100%;
                     background: Theme.bg;
                     TouchArea { }
-                    // Scrolls, so a short window never pushes the player bar out of view.
-                    Flickable {
+                    /// Whether the phone's Advanced card shows its rows. Collapsed to begin with.
+                    property <bool> advanced-open: false;
+
+                    // Phone: rounded cards of rows, each with its control on the right.
+                    if root.compact: Flickable {
+                        // Scroll up and down only.
+                        content-width: self.width;
+                        // A Flickable's content height comes from the layout's min-height, which
+                        // can come out a wrapped line short because a hint was measured before its
+                        // final width. Add a line so the last row always clears the player card.
+                        // (The preferred height is not used: it is clamped by the content height,
+                        // so binding to it feeds back into itself.)
+                        // The fold's animated height is a layout child, so the layout's min-height
+                        // already follows it; adding `advanced-fold.fold-h` here as well counted it
+                        // twice and left about a fold's worth of empty page under the card. The
+                        // allowance stays for the wrapped hints measured before their final width.
+                        content-height: max(self.height, settings-page.min-height + 16px);
+                        settings-page := VerticalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            padding-top: 16px;
+                            // The phone's player card floats over the page; the last row must clear it.
+                            padding-bottom: 180px;
+                            spacing: 8px;
+                            alignment: start;
+                            Label { text: "Settings"; color: Theme.text; font-size: 24px; font-weight: 800; height: 44px; }
+
+                            SettingsSection {
+                                title: "LIBRARY";
+                                SettingsRow {
+                                    divider: false;
+                                    label: "Music folder";
+                                    path-hint: true;
+                                    control-w: 44px;
+                                    hint: root.library-path != "" ? root.library-path : "No folder chosen";
+                                    // An orange line-art folder: a 44px touch target, no pill behind it.
+                                    Rectangle {
+                                        width: 44px;
+                                        height: 44px;
+                                        folder-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.choose-folder(); } }
+                                        // A rounded highlight behind the folder, so the whole target flashes.
+                                        TouchFlash { radius: 12px; pressed: folder-ta.pressed; }
+                                        Path {
+                                            width: 28px;
+                                            height: 28px;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                            viewbox-width: 28;
+                                            viewbox-height: 28;
+                                            commands: "M3 8.5a2 2 0 0 1 2-2h5.5l2.5 3H23a2 2 0 0 1 2 2V21a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z";
+                                            fill: transparent;
+                                            stroke: Theme.accent;
+                                            stroke-width: 2px;
+                                            stroke-line-cap: round;
+                                            stroke-line-join: round;
+                                        }
+                                    }
+                                }
+                            }
+
+                            SettingsSection {
+                                title: "DOWNLOADS";
+                                SettingsRow {
+                                    divider: false;
+                                    label: "Download quality";
+                                    hint: "Smaller files on a slow connection.";
+                                    SettingsPill {
+                                        text: root.bitrate-mode == 1 ? "Auto" : (root.bitrate-mode == 2 ? "Low" : "Off");
+                                        clicked => {
+                                            root.bitrate-mode = Math.mod(root.bitrate-mode + 1, 3);
+                                            root.set-bitrate-mode(root.bitrate-mode);
+                                        }
+                                    }
+                                }
+                            }
+
+                            SettingsSection {
+                                title: "PLAYBACK & AUTOPLAY";
+                                SettingsRow {
+                                    divider: false;
+                                    label: "Play while downloading";
+                                    control-w: 48px;
+                                    SettingsToggle {
+                                        on <=> root.stream-playback;
+                                        toggled(v) => { root.set-stream-playback(v); }
+                                    }
+                                }
+                                if root.autoplay-available: SettingsRow {
+                                    label: "Autoplay";
+                                    hint: "Similar songs follow the one you pick.";
+                                    control-w: 48px;
+                                    SettingsToggle {
+                                        on <=> root.autoplay;
+                                        toggled(v) => { root.set-autoplay(v); }
+                                    }
+                                }
+                                if root.autoplay-available: SettingsRow {
+                                    label: "Songs ready ahead";
+                                    control-w: 112px;
+                                    SettingsStepper {
+                                        min: 2;
+                                        max: 30;
+                                        value <=> root.autoplay-ahead;
+                                        changed(v) => { root.set-autoplay-ahead(v); }
+                                    }
+                                }
+                                if root.autoplay-available: SettingsRow {
+                                    label: "Played songs kept";
+                                    hint: "Older ones are deleted from the cache.";
+                                    control-w: 112px;
+                                    SettingsStepper {
+                                        min: 0;
+                                        max: 20;
+                                        value <=> root.autoplay-behind;
+                                        changed(v) => { root.set-autoplay-behind(v); }
+                                    }
+                                }
+                            }
+
+                            // Windows only: the app's own sign-in, in a window of its own.
+                            if root.login-supported: SettingsSection {
+                                title: "ACCOUNT";
+                                SettingsRow {
+                                    divider: false;
+                                    label: "YouTube account";
+                                    accent-hint: root.login-signed-in ? "Signed in" : "Not signed in";
+                                    hint: root.login-note != "" ? root.login-note : "Only needed if YouTube blocks downloads.";
+                                    SettingsPill {
+                                        text: root.signing-in ? "Signing in" : (root.login-signed-in ? "Sign out" : "Sign in");
+                                        primary: !root.login-signed-in;
+                                        clicked => { root.sign-in-out(); }
+                                    }
+                                }
+                            }
+
+                            // Only where a release exists for this system (not iOS, which has no updater).
+                            if root.update-supported: SettingsSection {
+                                title: "APP";
+                                SettingsRow {
+                                    divider: false;
+                                    label: "Updates";
+                                    hint: root.update-notes != "" ? root.update-notes : (root.update-info != "" ? root.update-info : "You have the latest version.");
+                                    SettingsPill {
+                                        text: root.update-state == 2 ? "Install" : "Check";
+                                        primary: root.update-state != 1;
+                                        busy: root.update-state == 1;
+                                        clicked => {
+                                            if (root.update-state == 2) { root.install-update(); }
+                                            else if (root.update-state == 0) { root.check-update(); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            SettingsSection {
+                                title: "ADVANCED";
+                                // Collapsed: one row with a chevron. Expanded: the same row without an
+                                // arrow, and the rows below it in the same card. Tapping folds them out
+                                // and back; neither state appears at once.
+                                SettingsRow {
+                                    divider: false;
+                                    flash: true;
+                                    flash-top-radius: 14px;
+                                    label: "Advanced";
+                                    hint: "yt-dlp, cache, Discord, Last.fm, proxy";
+                                    clicked => { settings-pane.advanced-open = !settings-pane.advanced-open; }
+                                    // Fades out as the card opens, back in as it closes. The slot keeps its
+                                    // width either way, so the label never shifts.
+                                    Label {
+                                        text: "\u{203A}";
+                                        color: Theme.muted;
+                                        font-size: 22px;
+                                        width: 92px;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                        opacity: settings-pane.advanced-open ? 0 : 1;
+                                        animate opacity { duration: settings-pane.advanced-open ? 120ms : 200ms; easing: ease-out; }
+                                    }
+                                }
+                                // The fold. Always present, so its rows keep the card's width even while
+                                // it is closed: a row added to a card that was already laid out showed
+                                // its text squeezed for one frame. Only the height animates, the rows
+                                // clip and fade with it, and the height also drives min-height because
+                                // a Flickable's scroll range is built from the layout's min-height:
+                                // without that the range would not follow the fold and the last row
+                                // could not be reached while or after it opens.
+                                advanced-fold := Rectangle {
+                                    clip: true;
+                                    vertical-stretch: 0;
+                                    property <length> fold-h: settings-pane.advanced-open ? advanced-rows.preferred-height : 0px;
+                                    animate fold-h {
+                                        duration: settings-pane.advanced-open ? 280ms : 220ms;
+                                        easing: settings-pane.advanced-open ? ease-out : ease-in-out;
+                                    }
+                                    // The fold's height. Its rows are clipped, so the page's scroll range
+                                    // is extended by this same value in the Flickable's content-height;
+                                    // with min-height it would double count, and animating min-height
+                                    // makes the Flickable's range jump.
+                                    height: self.fold-h;
+                                    // Closed, the fold is a clipped zero-height box, so nothing in it can
+                                    // be tapped or focused, while its rows stay laid out and measured.
+                                    advanced-rows := VerticalLayout {
+                                        width: parent.width;
+                                        opacity: settings-pane.advanced-open ? 1 : 0;
+                                        animate opacity { duration: settings-pane.advanced-open ? 220ms : 160ms; easing: ease-out; }
+                                        if root.tool-info != "": SettingsRow {
+                                            label: "yt-dlp";
+                                            hint: root.tool-info;
+                                            SettingsPill {
+                                                text: "Update";
+                                                primary: !root.tool-busy;
+                                                busy: root.tool-busy;
+                                                clicked => { root.update-tools(); }
+                                            }
+                                        }
+                                        SettingsRow {
+                                            label: "Cache";
+                                            hint: root.cache-busy ? root.cache-info : (root.cache-info + ". Safe to clear.");
+                                            SettingsPill {
+                                                text: "Clear";
+                                                primary: !root.cache-busy;
+                                                busy: root.cache-busy;
+                                                clicked => { root.clear-cache(); }
+                                            }
+                                        }
+                                        if root.discord-available: SettingsRow {
+                                            label: "Discord status";
+                                            hint: "Show what you are playing.";
+                                            control-w: 48px;
+                                            SettingsToggle {
+                                                on <=> root.discord;
+                                                toggled(v) => { root.set-discord(v); }
+                                            }
+                                        }
+                                        if root.autoplay-available: SettingsFieldRow {
+                                            label: "Last.fm API key";
+                                            hint: root.lastfm-note != "" ? root.lastfm-note : "Adds Last.fm to autoplay. Enter to apply.";
+                                            placeholder: "Optional";
+                                            bad: root.lastfm-bad;
+                                            text <=> root.lastfm-key;
+                                            accepted(t) => { root.set-lastfm-key(t); }
+                                        }
+                                        SettingsFieldRow {
+                                            label: "Proxy";
+                                            hint: root.proxy-note != "" ? root.proxy-note : "Empty for none. Enter to apply.";
+                                            placeholder: "http://127.0.0.1:8080";
+                                            bad: root.proxy-bad;
+                                            text <=> root.proxy;
+                                            accepted(t) => { root.set-proxy(t); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Wide window: the old flat page, unchanged.
+                    if !root.compact: Flickable {
                     // Scroll up and down only. Without this the page is as wide as its widest line.
                     content-width: self.width;
                     VerticalLayout {
@@ -1814,7 +2508,6 @@ export component MainWindow inherits Window {
                         }
                         HorizontalLayout {
                             height: root.compact ? 48px : 40px;
-                            alignment: start;
                             spacing: 12px;
                             Rectangle {
                                 width: 160px;
@@ -1835,7 +2528,9 @@ export component MainWindow inherits Window {
                                 color: Theme.muted;
                                 font-size: 16px;
                                 vertical-alignment: center;
-                                wrap: word-wrap;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                                preferred-width: 0px;
                             }
                         }
                         Label {
@@ -1844,10 +2539,10 @@ export component MainWindow inherits Window {
                             font-size: 16px;
                             wrap: word-wrap;
                         }
-                        Label { text: "UPDATES"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
-                        HorizontalLayout {
+                        // Only where a release exists for this system (not iOS, which has no updater).
+                        if root.update-supported: Label { text: "UPDATES"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
+                        if root.update-supported: HorizontalLayout {
                             height: 40px;
-                            alignment: start;
                             spacing: 12px;
                             Rectangle {
                                 width: 200px;
@@ -1874,9 +2569,12 @@ export component MainWindow inherits Window {
                                 color: Theme.muted;
                                 font-size: 16px;
                                 vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                                preferred-width: 0px;
                             }
                         }
-                        if root.update-notes != "" && root.update-state == 2: Label {
+                        if root.update-supported && root.update-notes != "" && root.update-state == 2: Label {
                             text: root.update-notes;
                             color: Theme.muted;
                             font-size: 16px;
@@ -1885,7 +2583,6 @@ export component MainWindow inherits Window {
                         Label { text: "DOWNLOADER"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
                         HorizontalLayout {
                             height: 40px;
-                            alignment: start;
                             spacing: 12px;
                             visible: root.tool-info != "";
                             Rectangle {
@@ -1907,6 +2604,58 @@ export component MainWindow inherits Window {
                                 color: Theme.muted;
                                 font-size: 16px;
                                 vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                                preferred-width: 0px;
+                            }
+                        }
+                        ChoiceRow {
+                            label: "Download quality";
+                            value: root.bitrate-mode == 1 ? "Auto" : (root.bitrate-mode == 2 ? "Low" : "Off");
+                            hint: "Auto drops to a smaller file when your connection is slow. Low always keeps the audio small; Off keeps the best quality.";
+                            cycle => {
+                                root.bitrate-mode = Math.mod(root.bitrate-mode + 1, 3);
+                                root.set-bitrate-mode(root.bitrate-mode);
+                            }
+                        }
+                        // Windows only: the app's own sign-in, in a window of its own.
+                        // The browser row below stays for people already using it.
+                        if root.login-supported: VerticalLayout {
+                            spacing: 2px;
+                            alignment: start;
+                            HorizontalLayout {
+                                spacing: 12px;
+                                Label {
+                                    text: "YouTube account";
+                                    color: Theme.text;
+                                    font-size: 16px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                    preferred-width: 0px;
+                                }
+                                Pill {
+                                    text: root.signing-in ? "Signing in…" : (root.login-signed-in ? "Sign out" : "Sign in");
+                                    primary: !root.login-signed-in;
+                                    clicked => { root.sign-in-out(); }
+                                }
+                            }
+                            Label {
+                                text: root.login-signed-in ? "Signed in" : "Not signed in";
+                                color: root.login-signed-in ? Theme.accent : Theme.muted;
+                                font-size: 16px;
+                            }
+                            Label {
+                                text: "Only needed if YouTube stops downloads. Opens a sign-in window; use a spare Google account. Your login stays encrypted on this PC.";
+                                color: Theme.muted;
+                                font-size: 16px;
+                                wrap: word-wrap;
+                            }
+                            if root.login-note != "": Label {
+                                text: root.login-note;
+                                color: Theme.muted;
+                                font-size: 16px;
+                                wrap: word-wrap;
                             }
                         }
                         Label {
@@ -1918,7 +2667,6 @@ export component MainWindow inherits Window {
                         Label { text: "CACHE"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
                         HorizontalLayout {
                             height: root.compact ? 48px : 40px;
-                            alignment: start;
                             spacing: 12px;
                             Rectangle {
                                 width: 160px;
@@ -1939,7 +2687,9 @@ export component MainWindow inherits Window {
                                 color: Theme.muted;
                                 font-size: 16px;
                                 vertical-alignment: center;
-                                wrap: word-wrap;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                                preferred-width: 0px;
                             }
                         }
                         Label {
@@ -1952,7 +2702,6 @@ export component MainWindow inherits Window {
                         if root.discord-available: HorizontalLayout {
                             height: 36px;
                             spacing: 12px;
-                            alignment: start;
                             Rectangle {
                                 width: 44px;
                                 height: 24px;
@@ -1974,13 +2723,12 @@ export component MainWindow inherits Window {
                                     clicked => { root.discord = !root.discord; root.set-discord(root.discord); }
                                 }
                             }
-                            Label { text: "Show what I am playing on Discord"; color: Theme.text; font-size: 16px; vertical-alignment: center; }
+                            Label { text: "Show what I am playing on Discord"; color: Theme.text; font-size: 16px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; preferred-width: 0px; }
                         }
                         Label { text: "PLAYBACK"; color: Theme.muted; font-size: 16px; font-weight: 700; height: 36px; vertical-alignment: bottom; }
                         HorizontalLayout {
                             height: 36px;
                             spacing: 12px;
-                            alignment: start;
                             Rectangle {
                                 width: 44px;
                                 height: 24px;
@@ -2002,12 +2750,11 @@ export component MainWindow inherits Window {
                                     clicked => { root.stream-playback = !root.stream-playback; root.set-stream-playback(root.stream-playback); }
                                 }
                             }
-                            Label { text: "Start playing while a song downloads"; color: Theme.text; font-size: 16px; vertical-alignment: center; }
+                            Label { text: "Start playing while a song downloads"; color: Theme.text; font-size: 16px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; preferred-width: 0px; }
                         }
                         if root.autoplay-available: HorizontalLayout {
                             height: 36px;
                             spacing: 12px;
-                            alignment: start;
                             Rectangle {
                                 width: 44px;
                                 height: 24px;
@@ -2029,7 +2776,7 @@ export component MainWindow inherits Window {
                                     clicked => { root.autoplay = !root.autoplay; root.set-autoplay(root.autoplay); }
                                 }
                             }
-                            Label { text: "Autoplay: keep playing similar songs"; color: Theme.text; font-size: 16px; vertical-alignment: center; }
+                            Label { text: "Autoplay: keep playing similar songs"; color: Theme.text; font-size: 16px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; preferred-width: 0px; }
                         }
                         if root.autoplay-available: Label {
                             text: "A song you pick plays alone, then similar songs from YouTube Music and Deezer follow. They download ahead while you listen, into a cache folder, not your library.";
@@ -2071,10 +2818,12 @@ export component MainWindow inherits Window {
                             }
                             if lastfm-input.text == "" && !lastfm-input.has-focus: Label {
                                 x: 12px;
+                                width: parent.width - 24px;
                                 text: "Last.fm API key (optional)";
                                 color: Theme.muted;
                                 font-size: 16px;
                                 vertical-alignment: center;
+                                overflow: elide;
                             }
                         }
                         if root.autoplay-available: Label {
@@ -2104,10 +2853,12 @@ export component MainWindow inherits Window {
                             }
                             if proxy-input.text == "" && !proxy-input.has-focus: Label {
                                 x: 12px;
+                                width: parent.width - 24px;
                                 text: "Proxy, such as http://127.0.0.1:8080 (empty: none)";
                                 color: Theme.muted;
                                 font-size: 16px;
                                 vertical-alignment: center;
+                                overflow: elide;
                             }
                         }
                         Label {
@@ -2178,7 +2929,13 @@ export component MainWindow inherits Window {
                     Flickable {
                     // Scroll up and down only.
                     content-width: self.width;
-                    VerticalLayout {
+                    // Same phone fix as Settings: the layout's measured height can come out short
+                    // because a wrapped hint was measured before its final width, so add room for
+                    // a few lines and the last row clears the player card.
+                    content-height: root.compact
+                        ? max(self.height, jam-page.min-height + 64px)
+                        : max(self.height, jam-page.min-height);
+                    jam-page := VerticalLayout {
                         padding-left: root.compact ? 16px : 32px;
                         padding-right: root.compact ? 16px : 32px;
                         padding-top: root.compact ? 16px : 32px;
@@ -2860,8 +3617,8 @@ export component MainWindow inherits Window {
     }
 
     // Phone: the player card. A tab with curved, sloping sides rises from the middle of the
-    // panel, and the panel holds the controls and the seek bar. All of it moves together. Tap the
-    // tab for the lyrics, or drag it up to lift the card and show the queue.
+    // panel, and the panel holds the controls and the seek bar. All of it moves together. Drag the
+    // tab up to lift the card and show the queue; tap it to close the queue. Lyrics have their own button.
     if root.compact: Rectangle {
         x: 0;
         y: root.card-y;
@@ -2987,8 +3744,6 @@ export component MainWindow inherits Window {
                             root.sheet-open = ((root.sheet-open ? 1.0 : 0.0) + root.sheet-drag) > 0.35;
                         } else if (root.sheet-open) {
                             root.sheet-open = false;
-                        } else {
-                            root.toggle-lyrics();
                         }
                         root.sheet-drag = 0;
                     }

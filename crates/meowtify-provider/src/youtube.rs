@@ -270,6 +270,10 @@ impl YouTube {
         cmd.arg(self.info.dir.join(id)).arg("--").arg(url);
         let out = tokio::time::timeout(Duration::from_secs(40), cmd.output()).await.ok()?.ok()?;
         let path = self.info.path(id);
+        if !out.status.success() {
+            let msg = last_error_line(&String::from_utf8_lossy(&out.stderr));
+            note_cookie_failure(&msg);
+        }
         (out.status.success() && path.is_file()).then_some(path)
     }
 
@@ -278,6 +282,14 @@ impl YouTube {
         // Ignore the user's own yt-dlp config so output stays predictable.
         c.args(["--ignore-config", "--no-warnings", "--no-colors"]);
         crate::net::apply(&mut c);
+        // The in-app sign-in comes first: it names one account, while a browser profile may
+        // hold several. Opt-in either way; yt-dlp reads the cookies to get past YouTube's
+        // "Sign in to confirm you're not a bot" check.
+        if let Some(path) = crate::net::login_cookies_in_use() {
+            c.arg("--cookies").arg(path);
+        } else if let Some(browser) = crate::net::cookies_in_use() {
+            c.arg("--cookies-from-browser").arg(browser);
+        }
         // Without this, Windows prints non-ASCII titles in the legacy code page
         // and the reported file path no longer matches the real file.
         c.env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8");
@@ -300,7 +312,9 @@ impl YouTube {
     pub(crate) async fn list_with(&self, mut cmd: Command, parse: fn(&str) -> Result<Option<Item>>) -> Result<Vec<Item>> {
         let out = cmd.output().await.map_err(|e| ProviderError::Io(e.to_string()))?;
         if !out.status.success() {
-            return Err(ProviderError::Tool(last_error_line(&String::from_utf8_lossy(&out.stderr))));
+            let msg = last_error_line(&String::from_utf8_lossy(&out.stderr));
+            note_cookie_failure(&msg); // the next command runs without the cookies
+            return Err(ProviderError::Tool(msg));
         }
         let text = String::from_utf8_lossy(&out.stdout);
         let mut items = Vec::new();
@@ -553,6 +567,20 @@ fn last_error_line(stderr: &str) -> String {
         .unwrap_or_else(|| "yt-dlp failed".to_string())
 }
 
+/// A failed run while cookies were in use: pause whichever sign-in it was, so the next
+/// command does not repeat the same failure. `true` when the failure was about the cookies.
+fn note_cookie_failure(text: &str) -> bool {
+    if crate::net::login_cookies_in_use().is_some() && crate::net::is_login_cookie_error(text) {
+        crate::net::login_cookies_failed();
+        true
+    } else if crate::net::cookies_in_use().is_some() && crate::net::is_cookie_error(text) {
+        crate::net::cookies_failed();
+        true
+    } else {
+        false
+    }
+}
+
 fn parse_progress(line: &str) -> Option<f32> {
     let v = line.strip_prefix(PROGRESS_PREFIX)?.trim().trim_end_matches('%').trim();
     v.parse::<f32>().ok().map(|p| p.clamp(0.0, 100.0))
@@ -636,6 +664,27 @@ impl Provider for YouTube {
     }
 
     async fn download(&self, item: &Item, dest_dir: &Path, progress: ProgressFn) -> Result<PathBuf> {
+        let first = self.download_once(item, dest_dir, progress.clone()).await;
+        if let Err(ProviderError::Tool(msg)) = &first {
+            // A stale in-app sign-in is paused, but the same request would fail again: the
+            // user is told to sign in again instead of retrying in a loop.
+            if crate::net::login_cookies_in_use().is_some() && crate::net::is_login_cookie_error(msg) {
+                crate::net::login_cookies_failed();
+                return first;
+            }
+            // A browser whose cookies cannot be read (Chrome-based browsers lock them while they
+            // run) must not stop the download: say so once, then run again without the cookies.
+            if crate::net::cookies_in_use().is_some() && crate::net::is_cookie_error(msg) {
+                crate::net::cookies_failed();
+                return self.download_once(item, dest_dir, progress).await;
+            }
+        }
+        first
+    }
+}
+
+impl YouTube {
+    async fn download_once(&self, item: &Item, dest_dir: &Path, progress: ProgressFn) -> Result<PathBuf> {
         let url = validate_youtube_url(&item.url)?;
         std::fs::create_dir_all(dest_dir).map_err(|e| ProviderError::Io(e.to_string()))?;
         // With the lookup done ahead (or done now), yt-dlp starts downloading at once.
@@ -740,6 +789,16 @@ impl YouTube {
             let mut msg = last_error_line(&stderr_text);
             if msg.contains("not available on this app") {
                 msg.push_str(" (yt-dlp is probably out of date; update it)");
+            }
+            // YouTube asks most songs for a signed-in session now. The in-app sign-in (or the
+            // browser one) is the opt-in fix, so point at it instead of leaving a dead end.
+            let lower = msg.to_lowercase();
+            if lower.contains("not a bot") || lower.contains("sign in to confirm") {
+                if crate::net::login_cookies_in_use().is_some() {
+                    msg.push_str(" The YouTube sign-in may have expired; sign in again in Settings.");
+                } else if crate::net::cookies_browser().is_none() {
+                    msg.push_str(" Sign in to YouTube in Settings to fix this.");
+                }
             }
             // Say which program ran, so a wrong or stale copy is easy to spot.
             msg.push_str(&format!(" [{} {}]", self.yt_dlp.path().display(), self.version().await));

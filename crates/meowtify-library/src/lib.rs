@@ -2,18 +2,20 @@
 //! truth. This crate scans them into [`Track`] values and serves them through
 //! [`MetadataSource`].
 
+mod artists;
 mod playlists;
 mod scan;
 mod settings;
 
-use std::path::PathBuf;
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use meowtify_core::{Error, MetadataSource, Page, Playlist, Result, Track};
 
+pub use artists::{clean_artist, ArtistIndex, MAX_ARTISTS};
 pub use playlists::{PlaylistData, Playlists};
 pub use scan::{find_audio_files, is_audio, scan, AUDIO_EXTENSIONS};
 pub use settings::{config_dir, Settings, AHEAD_RANGE, BEHIND_RANGE};
@@ -290,6 +292,30 @@ impl Library {
     /// A library track by its file path, or a transient one added for autoplay.
     pub fn find(&self, uri: &str) -> Option<Track> {
         self.lookup.read().unwrap().by_uri.get(uri).cloned().or_else(|| self.extras.read().unwrap().map.get(uri).cloned())
+    }
+
+    /// The artist remembered for a download id (the id in its `Title [id].ext` name), if any.
+    pub fn indexed_artist(&self, id: &str) -> Option<String> {
+        ArtistIndex::local().get(id)
+    }
+
+    /// Remembers the artist of a download for later scans. The id is taken from its path.
+    /// Returns whether the index changed.
+    pub fn remember_artist(&self, path: &str, artist: &str) -> bool {
+        match meowtify_core::download_id(path) {
+            Some(id) => ArtistIndex::local().set(id, artist),
+            None => false,
+        }
+    }
+
+    /// Whether this download's artist repair failed in the last 24 hours.
+    pub fn artist_repair_failed(&self, id: &str) -> bool {
+        ArtistIndex::local().failed_recently(id)
+    }
+
+    /// Notes a failed artist repair for this download, so it is not retried today.
+    pub fn note_artist_repair_failed(&self, id: &str) {
+        ArtistIndex::local().note_failed(id);
     }
 
     /// Downloads whose tags name no artist, with the provider id from the file name.

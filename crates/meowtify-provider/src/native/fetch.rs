@@ -18,13 +18,9 @@ use crate::{ProviderError, ProgressFn, Result};
 /// requests; yt-dlp uses 10 MiB, and 9 MiB keeps each request under a minute on a slow link.
 pub(crate) const CHUNK: u64 = 9 * 1024 * 1024;
 
-/// Bytes per range request when a whole song is saved. YouTube gives a fast burst and then
-/// throttles a long range to a fraction of the link, so a song is split into small ranges.
-const PIECE: u64 = 1024 * 1024;
-
-/// Range requests in flight at once. Each one holds a 64 KiB read buffer and one
-/// connection, so this is the whole cost in memory (plus TLS state).
-const PARALLEL: usize = 4;
+/// A range at least this large says something about the link speed. Smaller ones (a tail,
+/// a retry) are left out of the average.
+const SPEED_SAMPLE: u64 = 1024 * 1024;
 
 /// A read that takes longer than this means the connection is dead.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
@@ -137,6 +133,7 @@ impl Ranged {
 
     async fn piece_once(&self, part: &Path, offset: u64, want: u64, feed: &Feed) -> Result<Piece> {
         let headers: Vec<(&str, &str)> = self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let started = std::time::Instant::now();
         let mut reply = http::get_range(&self.url, offset, want, &headers).await?;
         let whole = match reply.status {
             206 => false,
@@ -176,7 +173,20 @@ impl Ranged {
             }
         }
         file.flush().await.map_err(|e| ProviderError::Io(e.to_string()))?;
+        record_range(got, started);
         Ok(Piece { total, whole, got })
+    }
+}
+
+/// Reports the speed of one finished range to the bitrate setting, so `Auto` can tell a
+/// slow link from a fast one. Only ranges big enough to mean something are counted.
+pub(crate) fn record_range(got: u64, started: std::time::Instant) {
+    if got < SPEED_SAMPLE {
+        return;
+    }
+    let secs = started.elapsed().as_secs_f64();
+    if secs > 0.0 {
+        crate::link::record_throughput((got as f64 / secs) as u64);
     }
 }
 
@@ -185,10 +195,10 @@ impl Ranged {
 /// `total_hint` is the size the API stated; the server's `Content-Range` replaces it.
 /// Progress is a percentage of the real length, and stays under 100 until the rename.
 ///
-/// YouTube throttles a single long range after a short burst, which is why a whole song is
-/// fetched as small ranges with a few of them in flight; the streaming path never waits for
-/// all of it, so it does not feel this. Every piece is written straight to disk at its
-/// offset, so memory stays flat however long the song is.
+/// Ranges are the same large sequential ones the streaming path uses: one connection, a
+/// request per `CHUNK`, each written to disk as it arrives. Small parallel pieces made every
+/// piece pay a cellular round trip and ran each group at its slowest member, which is why
+/// saving a song was slow on a phone. Memory stays flat however long the song is.
 pub(crate) async fn download_ranged(
     url: &str,
     headers: &[(&str, &str)],
@@ -205,66 +215,31 @@ pub(crate) async fn download_ranged(
         progress,
     });
 
-    // The first piece is asked for on its own: it reports the real length.
-    let first_want = total.map_or(CHUNK, |t| PIECE.min(t));
-    let first = ranged.piece(part, 0, first_want, &feed).await?;
-    if let Some(t) = first.total {
-        total = Some(t);
-        feed.total.store(t, Ordering::Relaxed);
-    }
-    if first.whole {
-        return checked_size(part, total).await;
-    }
-    let mut offset = first.got;
-    if offset == 0 {
-        return Err(ProviderError::Tool("the audio server sent no audio".into()));
-    }
-
-    match total {
-        Some(total) if offset < total => {
-            // The rest in small ranges, up to `PARALLEL` at once. The spans do not overlap,
-            // so each task writes its own part of the file without a lock.
-            let mut spans = Vec::new();
-            let mut at = offset;
-            while at < total {
-                let len = PIECE.min(total - at);
-                spans.push((at, len));
-                at += len;
-            }
-            for group in spans.chunks(PARALLEL) {
-                let mut set = tokio::task::JoinSet::new();
-                for &(start, len) in group {
-                    let (ranged, part, feed) = (ranged.clone(), part.to_path_buf(), feed.clone());
-                    set.spawn(async move {
-                        let piece = ranged.piece(&part, start, len, &feed).await?;
-                        Ok::<(u64, u64, Piece), ProviderError>((start, len, piece))
-                    });
-                }
-                while let Some(joined) = set.join_next().await {
-                    let (start, len, piece) =
-                        joined.map_err(|e| ProviderError::Tool(format!("a download piece failed: {e}")))??;
-                    if piece.whole {
-                        return Err(ProviderError::Tool(format!("the server ignored the range at {start}")));
-                    }
-                    if piece.got != len {
-                        return Err(ProviderError::Tool(format!(
-                            "the server sent {} bytes from {start}, not {len}",
-                            piece.got
-                        )));
-                    }
-                }
-            }
+    // The first request also reports the real length.
+    let mut offset = 0u64;
+    loop {
+        let want = chunk_len(offset, total);
+        let piece = ranged.piece(part, offset, want, &feed).await?;
+        if let Some(t) = piece.total {
+            total = Some(t);
+            feed.total.store(t, Ordering::Relaxed);
         }
-        Some(_) => {}
-        None => {
-            // No length from the server: keep asking until a short answer ends the file.
-            loop {
-                let piece = ranged.piece(part, offset, CHUNK, &feed).await?;
-                offset += piece.got;
-                if piece.whole || piece.got < CHUNK {
-                    break;
-                }
-            }
+        if piece.whole {
+            return checked_size(part, total).await;
+        }
+        if offset == 0 && piece.got == 0 {
+            return Err(ProviderError::Tool("the audio server sent no audio".into()));
+        }
+        if piece.got == 0 {
+            break; // 416 at the end: the file is already complete
+        }
+        offset += piece.got;
+        let done = match total {
+            Some(t) => offset >= t,
+            None => piece.got < want,
+        };
+        if done {
+            break;
         }
     }
 
@@ -350,13 +325,13 @@ mod tests {
         assert_eq!(parse_content_range("items 0-1/2"), None);
     }
 
-    /// A whole song is fetched as several ranges at once, and every byte lands in place.
+    /// A whole song is fetched as a few large sequential ranges, and every byte lands in place.
     #[tokio::test]
-    async fn downloads_a_song_in_parallel_pieces() {
+    async fn downloads_a_song_in_large_sequential_ranges() {
         use std::sync::atomic::AtomicUsize;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let total = PIECE as usize * 2 + 320_000;
+        let total = CHUNK as usize + 320_000;
         let data: Arc<Vec<u8>> = Arc::new((0..total).map(|i| (i % 251) as u8).collect());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -410,7 +385,7 @@ mod tests {
             .unwrap();
         assert_eq!(size, data.len() as u64);
         assert_eq!(std::fs::read(&part).unwrap(), *data, "the pieces did not land in order");
-        assert!(served.load(Ordering::SeqCst) >= 3, "the song was not split into ranges");
+        assert_eq!(served.load(Ordering::SeqCst), 2, "the song should take one large range plus the tail");
         let _ = std::fs::remove_dir_all(&dir);
         server.abort();
     }

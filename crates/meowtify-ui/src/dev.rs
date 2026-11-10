@@ -13,15 +13,17 @@
 //! - `MEOWTIFY_AUTOPLAY=<n>` plays result `n` as soon as results arrive.
 //! - `MEOWTIFY_SNAPSHOT=<file.png>` saves a screenshot after `MEOWTIFY_SNAPSHOT_SECS` seconds
 //!   (default 3) and exits.
+//! - `MEOWTIFY_FAKE_UPDATE=1` shows the sidebar's update button; `progress` also plays its
+//!   download animation, so both can be looked at without a real release.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use slint::ComponentHandle;
 
 use crate::MainWindow;
 
-/// Applies the variables that are set. The returned timer must live as long as the window runs.
-pub(crate) fn install(win: &MainWindow) -> slint::Timer {
+/// Applies the variables that are set. The returned timers must live as long as the window runs.
+pub(crate) fn install(win: &MainWindow) -> Vec<slint::Timer> {
     // `MEOWTIFY_SIZE=393x852` sizes the window like a phone; `MEOWTIFY_TOUCH=1` turns touch mode on.
     if let Some((w, h)) = std::env::var("MEOWTIFY_SIZE").ok().and_then(|v| {
         let (w, h) = v.split_once('x')?;
@@ -82,6 +84,39 @@ pub(crate) fn install(win: &MainWindow) -> slint::Timer {
             }
         });
     }
+    // A release that does not exist, for looking at the sidebar's update button without
+    // waiting for one. `progress` also plays the download animation.
+    let mut timers = Vec::new();
+    if let Ok(fake) = std::env::var("MEOWTIFY_FAKE_UPDATE") {
+        let weak = win.as_weak();
+        let progress = fake == "progress";
+        slint::Timer::single_shot(Duration::from_millis(1500), move || {
+            if let Some(w) = weak.upgrade() {
+                w.set_update_supported(true);
+                w.set_update_installing(progress);
+                if progress {
+                    w.set_update_state(1);
+                    w.set_update_info("Downloading 9.9.9\u{2026}".into());
+                } else {
+                    w.set_update_state(2);
+                    w.set_update_info("Version 9.9.9 is available.".into());
+                    w.set_update_notes("Test notes.".into());
+                }
+            }
+        });
+        if progress {
+            // One pass from 0 to 1 every four seconds.
+            let weak = win.as_weak();
+            let start = Instant::now();
+            let mut anim = slint::Timer::default();
+            anim.start(slint::TimerMode::Repeated, Duration::from_millis(50), move || {
+                if let Some(w) = weak.upgrade() {
+                    w.set_update_progress((start.elapsed().as_secs_f32() / 4.0).fract());
+                }
+            });
+            timers.push(anim);
+        }
+    }
     let timer = slint::Timer::default();
     if let Ok(path) = std::env::var("MEOWTIFY_SNAPSHOT") {
         let weak = win.as_weak();
@@ -102,7 +137,8 @@ pub(crate) fn install(win: &MainWindow) -> slint::Timer {
             let _ = slint::quit_event_loop();
         });
     }
-    timer
+    timers.push(timer);
+    timers
 }
 
 /// The result `MEOWTIFY_AUTOPLAY` asks to play, if the variable is set.

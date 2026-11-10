@@ -40,6 +40,7 @@ struct Entry {
     duration: Option<f64>,
     webpage_url: Option<String>,
     url: Option<String>,
+    thumbnail: Option<String>,
 }
 
 /// One line of yt-dlp JSON from a SoundCloud listing. Entries without an id or a page are skipped.
@@ -57,7 +58,7 @@ fn parse_entry(line: &str) -> Result<Option<Item>> {
         artist: e.uploader.unwrap_or_default(),
         duration_secs: e.duration.filter(|d| *d >= 0.0).map(|d| d as u32),
         url,
-        thumbnail: None,
+        thumbnail: e.thumbnail.filter(|t| t.starts_with("https://")),
         id,
     }))
 }

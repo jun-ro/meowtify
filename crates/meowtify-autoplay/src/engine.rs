@@ -37,9 +37,14 @@ const FINISH_TIMEOUT: Duration = Duration::from_secs(20);
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(20);
 /// Suggestions that fail to download before a search gives up for now.
 const MAX_FAILURES: usize = 8;
-/// Songs fetched at the same time. Each one is a yt-dlp process of its own, which is the cost
-/// to watch: four is fast and still light.
-const WINDOW: usize = 4;
+/// Songs fetched at the same time. The in-process client takes about a second a song, so two are
+/// enough, and fewer requests at once is what keeps YouTube from throttling this computer.
+const WINDOW: usize = 2;
+/// The least time between the starts of two YouTube lookups, plus a random 0 to one second, so
+/// the requests do not arrive in a burst (that is what looks like a bot). About 24 a minute at most.
+const PACE_GAP: Duration = Duration::from_millis(1500);
+/// When the next YouTube lookup may start.
+static NEXT_LOOKUP: Mutex<Option<Instant>> = Mutex::new(None);
 /// How many suggestions get their stream link looked up while the other lists are still coming.
 const WARM: usize = 2;
 /// The longest a search for suggestions waits for the slowest service. A slow answer only
@@ -542,8 +547,63 @@ async fn prepare(env: &Env, cand: &Candidate) -> Option<(String, Item)> {
     None
 }
 
+/// How long YouTube is left alone after it answered "sign in to confirm you're not a bot".
+const BLOCK_PAUSE: Duration = Duration::from_secs(10 * 60);
+/// When YouTube's bot check last refused a download, and so until when it is skipped.
+static YOUTUBE_BLOCK: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// The text of an error that means YouTube wants a sign-in, not that this one song failed.
+fn is_bot_check(error: &str) -> bool {
+    let e = error.to_lowercase();
+    e.contains("not a bot") || e.contains("sign in to confirm") || e.contains("sign-in check")
+}
+
+fn youtube_blocked() -> bool {
+    YOUTUBE_BLOCK.lock().ok().and_then(|g| *g).is_some_and(|until| Instant::now() < until)
+}
+
+/// Every song would fail the same way, and each failure costs several seconds of yt-dlp, so
+/// stop asking YouTube for a while and use the fallback providers straight away.
+fn block_youtube() {
+    if let Ok(mut g) = YOUTUBE_BLOCK.lock() {
+        if g.is_none_or(|until| Instant::now() >= until) {
+            eprintln!("autoplay: YouTube asks for a sign-in; using the other sources for {} minutes", BLOCK_PAUSE.as_secs() / 60);
+        }
+        *g = Some(Instant::now() + BLOCK_PAUSE);
+    }
+}
+
+/// How long the caller waits for its turn, and books the turn after it: each call gets a slot
+/// [`PACE_GAP`] plus a little random time after the previous one.
+fn next_turn(now: Instant, jitter_ms: u64) -> Duration {
+    let mut next = NEXT_LOOKUP.lock().unwrap_or_else(|e| e.into_inner());
+    let slot = next.map_or(now, |n| n.max(now));
+    *next = Some(slot + PACE_GAP + Duration::from_millis(jitter_ms));
+    slot.saturating_duration_since(now)
+}
+
+/// Waits for this lookup's turn (see [`next_turn`]).
+async fn pace() {
+    let jitter = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| u64::from(d.subsec_millis()) % 1000);
+    let wait = next_turn(Instant::now(), jitter);
+    if !wait.is_zero() {
+        tokio::time::sleep(wait).await;
+    }
+}
+
 async fn from_main(env: &Env, cand: &Candidate) -> Option<(String, Item)> {
-    let item = tokio::time::timeout(RESOLVE_TIMEOUT, resolve(cand)).await.ok()??;
+    if youtube_blocked() {
+        return None;
+    }
+    pace().await;
+    let began = Instant::now();
+    let item = match tokio::time::timeout(RESOLVE_TIMEOUT, resolve(cand)).await {
+        Ok(Some(item)) => item,
+        _ => {
+            eprintln!("autoplay: no YouTube copy of {:?} found in {:?}", cand.title, began.elapsed());
+            return None;
+        }
+    };
     if item.duration_secs.is_some_and(|s| !(MIN_SECS..=MAX_SECS).contains(&s)) {
         return None;
     }
@@ -560,7 +620,21 @@ async fn from_main(env: &Env, cand: &Candidate) -> Option<(String, Item)> {
             let progress: meowtify_provider::ProgressFn = Arc::new(|_| {});
             let ready: meowtify_provider::ReadyFn = Arc::new(|_| {});
             // The direct download is the fast path (about a second); it falls back to yt-dlp by itself.
-            let path = tokio::time::timeout(DOWNLOAD_TIMEOUT, env.provider.stream(&item, &env.cache, progress, ready)).await.ok()?.ok()?;
+            let path = match tokio::time::timeout(DOWNLOAD_TIMEOUT, env.provider.stream(&item, &env.cache, progress, ready)).await {
+                Ok(Ok(path)) => path,
+                Ok(Err(e)) => {
+                    let why = e.to_string();
+                    eprintln!("autoplay: download of {:?} failed after {:?}: {why}", item.title, began.elapsed());
+                    if is_bot_check(&why) {
+                        block_youtube();
+                    }
+                    return None;
+                }
+                Err(_) => {
+                    eprintln!("autoplay: download of {:?} timed out", item.title);
+                    return None;
+                }
+            };
             // Makes the file seekable and tagged; a failure leaves a playable file.
             let _ = tokio::time::timeout(FINISH_TIMEOUT, env.provider.finish(&item, &path)).await;
             path
@@ -590,10 +664,36 @@ async fn from_fallback(env: &Env, provider: &Arc<dyn Provider>, cand: &Candidate
     Some((register(env, &path, &item, cand), item))
 }
 
+/// Songs whose cover link is kept at most. Older links drop out first.
+const COVER_LINKS_KEPT: usize = 200;
+
+/// Cover links of songs that have no YouTube id (the SoundCloud and Audius fallbacks), by the
+/// song's uri. The queue panel asks for them: a file of the fallback sources carries no cover tag,
+/// and its uri says nothing about where its cover is.
+static COVER_LINKS: Mutex<VecDeque<(String, String)>> = Mutex::new(VecDeque::new());
+
+fn remember_cover(uri: &str, link: &str) {
+    let mut links = COVER_LINKS.lock().unwrap_or_else(|e| e.into_inner());
+    links.retain(|(u, _)| u != uri);
+    links.push_back((uri.to_string(), link.to_string()));
+    while links.len() > COVER_LINKS_KEPT {
+        links.pop_front();
+    }
+}
+
+/// The cover link of an autoplay song that came from a fallback source, if it had one.
+pub fn cover_link(uri: &str) -> Option<String> {
+    COVER_LINKS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(u, _)| u == uri).map(|(_, l)| l.clone())
+}
+
 /// Makes the file playable by the player without listing it in the library.
 fn register(env: &Env, path: &Path, item: &Item, cand: &Candidate) -> String {
     let secs = item.duration_secs.or(cand.duration_secs).unwrap_or(0);
-    env.library.add_transient(path, &item.title, &item.artist, secs.saturating_mul(1000)).uri.to_string()
+    let uri = env.library.add_transient(path, &item.title, &item.artist, secs.saturating_mul(1000)).uri.to_string();
+    if let Some(link) = item.thumbnail.as_deref().filter(|_| item.provider != "youtube") {
+        remember_cover(&uri, link);
+    }
+    uri
 }
 
 /// Marks a reused cache file as new. The sweep deletes unprotected files older than
@@ -663,6 +763,42 @@ mod tests {
         assert_eq!(removed, vec![orphan.to_string_lossy().into_owned()]);
         assert!(!orphan.exists() && playing.exists() && fresh.exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn lookups_get_turns_a_gap_apart() {
+        let t0 = Instant::now();
+        *NEXT_LOOKUP.lock().unwrap() = None;
+        assert_eq!(next_turn(t0, 500), Duration::ZERO, "the first one starts at once");
+        let second = next_turn(t0, 0);
+        assert_eq!(second, PACE_GAP + Duration::from_millis(500));
+        let third = next_turn(t0, 0);
+        assert_eq!(third, second + PACE_GAP);
+        // After a quiet minute the next one starts at once again.
+        assert_eq!(next_turn(t0 + Duration::from_secs(60), 0), Duration::ZERO);
+        *NEXT_LOOKUP.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn cover_links_are_found_by_uri_and_the_oldest_drop_out() {
+        remember_cover("test-uri-first", "https://n.example.com/first.jpg");
+        assert_eq!(cover_link("test-uri-first").as_deref(), Some("https://n.example.com/first.jpg"));
+        remember_cover("test-uri-first", "https://n.example.com/again.jpg");
+        assert_eq!(cover_link("test-uri-first").as_deref(), Some("https://n.example.com/again.jpg"));
+        assert_eq!(cover_link("test-uri-unknown"), None);
+        for i in 0..COVER_LINKS_KEPT + 5 {
+            remember_cover(&format!("test-uri-fill-{i}"), "https://n.example.com/x.jpg");
+        }
+        assert_eq!(cover_link("test-uri-first"), None);
+        assert!(cover_link(&format!("test-uri-fill-{}", COVER_LINKS_KEPT + 4)).is_some());
+    }
+
+    #[test]
+    fn a_sign_in_demand_is_told_from_an_ordinary_failure() {
+        assert!(is_bot_check("[youtube] x: Sign in to confirm you\u{fffd}re not a bot. Use --cookies-from-browser"));
+        assert!(is_bot_check("YouTube wants a sign-in check for this song. Try another source"));
+        assert!(!is_bot_check("HTTP 404 not found"));
+        assert!(!is_bot_check("connection reset by peer"));
     }
 
     #[test]

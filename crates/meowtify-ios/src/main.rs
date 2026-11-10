@@ -71,7 +71,7 @@ mod app {
         if let Err(e) = meowtify_provider::set_proxy(&settings.proxy) {
             eprintln!("ignoring the saved proxy: {e}");
         }
-        meowtify_provider::set_low_bitrate(settings.low_bitrate);
+        meowtify_provider::set_bitrate_mode(meowtify_provider::BitrateMode::from_str(&settings.effective_bitrate_mode()));
 
         let rt_handle = rt.handle().clone();
         let (handle, commands) = AppHandle::new(32, 64);

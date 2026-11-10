@@ -12,4 +12,4 @@ mod rank;
 mod state;
 mod taste;
 
-pub use engine::{cache_dir, Autoplay, Control};
+pub use engine::{cache_dir, cover_link, Autoplay, Control};

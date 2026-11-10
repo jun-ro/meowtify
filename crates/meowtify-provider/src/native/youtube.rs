@@ -419,6 +419,7 @@ impl NativeYouTube {
                 break;
             }
             let want = fetch::chunk_len(offset, total);
+            let started = Instant::now();
             let mut reply = http::get_range(&resolved.stream.url, offset, want, &headers).await?;
             let whole = match reply.status {
                 206 => false,
@@ -460,6 +461,7 @@ impl NativeYouTube {
                 }
             }
             file.flush().await.map_err(|e| ProviderError::Io(e.to_string()))?;
+            fetch::record_range(got, started);
             if got == 0 || whole || (total.is_none() && got < want) {
                 break;
             }
@@ -990,6 +992,43 @@ mod tests {
         eprintln!("saved {} ({} bytes)", path.display(), std::fs::metadata(&path).unwrap().len());
         assert!(std::fs::metadata(&path).unwrap().len() > MIN_AUDIO);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Needs the network. Downloads a handful of ordinary songs one after another with the
+    /// in-process client and reports how many worked and how long each took. This is the check
+    /// for "does the native client get past YouTube's bot check on this computer".
+    /// `cargo test -j 2 -p meowtify-provider --features native-extract live_native_many -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_native_many_songs() {
+        let yt = NativeYouTube::new();
+        let dir = std::env::temp_dir().join(format!("meowtify-native-many-{}", std::process::id()));
+        let queries = ["blinding lights the weeknd", "bohemian rhapsody queen", "tsubi club", "bad guy billie eilish", "levitating dua lipa", "after dark mr kitty"];
+        let (mut ok, mut failed) = (0, 0);
+        for q in queries {
+            let started = std::time::Instant::now();
+            let items = match yt.search(q, 3).await {
+                Ok(i) if !i.is_empty() => i,
+                other => {
+                    eprintln!("SEARCH FAILED {q}: {:?}", other.map(|i| i.len()));
+                    failed += 1;
+                    continue;
+                }
+            };
+            match yt.download(&items[0], &dir, Arc::new(|_| {})).await {
+                Ok(p) => {
+                    ok += 1;
+                    eprintln!("OK   {q}: {} bytes in {:?}", std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0), started.elapsed());
+                }
+                Err(e) => {
+                    failed += 1;
+                    eprintln!("FAIL {q}: {e} after {:?}", started.elapsed());
+                }
+            }
+        }
+        eprintln!("native client: {ok} ok, {failed} failed");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ok > 0, "no song could be downloaded");
     }
 
     /// Needs the network: `cargo test -p meowtify-provider --features native-extract live_native_general -- --ignored --nocapture`

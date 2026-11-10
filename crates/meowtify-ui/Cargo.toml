@@ -31,5 +31,9 @@ gif = { version = "0.14", default-features = false, features = ["std"] }
 rfd = "0.17"
 slint = { workspace = true, features = ["backend-winit", "renderer-femtovg", "unstable-winit-030"] }
 
+# The in-app YouTube sign-in keeps its cookie file encrypted for the Windows user only.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
 [target.'cfg(target_os = "ios")'.dependencies]
 slint = { workspace = true, features = ["backend-winit", "renderer-skia"] }

@@ -2,6 +2,9 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod deeplink;
+/// Windows only: `--login` is the sign-in window, a hidden mode of this same program.
+#[cfg(windows)]
+mod login;
 #[cfg(any(debug_assertions, feature = "dev"))]
 mod mock;
 
@@ -30,6 +33,16 @@ fn mock_services() -> (Arc<dyn PlaybackEngine>, Arc<dyn MetadataSource>) {
 }
 
 fn main() {
+    // Windows: `--login <cookies.txt> [--anonymous-test]` is the sign-in helper, a hidden mode
+    // of this same program so the updater only ever replaces meowtify.exe. It runs before the
+    // runtime, settings and the single-instance check: its window is its own process.
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--login") {
+        let out = std::env::args().nth(2).map(std::path::PathBuf::from);
+        let anonymous = std::env::args().any(|a| a == "--anonymous-test");
+        std::process::exit(login::run(out.as_deref(), anonymous));
+    }
+
     let mock = cfg!(any(debug_assertions, feature = "dev")) && std::env::args().any(|a| a == "--mock");
 
     // A `meowtify://jam/…` link is how a guest joins. When another copy is running, it gets the
@@ -69,9 +82,13 @@ fn main() {
     if let Err(e) = meowtify_provider::set_proxy(&settings.proxy) {
         eprintln!("ignoring the saved proxy: {e}");
     }
-    // A computer has no cellular link, so this never makes a download small here; the
-    // setting is read anyway so a config copied to a phone keeps working.
-    meowtify_provider::set_low_bitrate(settings.low_bitrate);
+    // Reading cookies out of the user's browser is no longer offered: it fails while Chrome-based
+    // browsers run, and nobody should have to choose a browser. The in-app sign-in replaces it, so
+    // an old saved choice (`settings.cookies_browser`) is ignored and yt-dlp runs without it.
+    let _ = meowtify_provider::set_cookies_browser("");
+    // A computer has no cellular link, so this never makes a download small here by itself;
+    // the setting is read anyway so a config copied to a phone keeps working.
+    meowtify_provider::set_bitrate_mode(meowtify_provider::BitrateMode::from_str(&settings.effective_bitrate_mode()));
 
     let rt_handle = rt.handle().clone();
     let (handle, commands) = AppHandle::new(32, 64);
@@ -92,7 +109,11 @@ fn main() {
         let tools = Tools::locate_or_default(&dir);
         let yt = Arc::new(YtDlp::new(tools.yt_dlp.clone(), dir));
         yt_dlp = Some(yt.clone());
-        let provider: Arc<dyn meowtify_provider::Provider> = Arc::new(YouTube::with_yt_dlp(tools.clone(), yt.clone()));
+        // YouTube: the in-process client first (no program to start, no sign-in, about a second
+        // a song, and it gets past the "not a bot" check that stops yt-dlp), yt-dlp behind it.
+        let yt_dlp_youtube: Arc<dyn meowtify_provider::Provider> = Arc::new(YouTube::with_yt_dlp(tools.clone(), yt.clone()));
+        let native_youtube: Arc<dyn meowtify_provider::Provider> = Arc::new(meowtify_provider::NativeYouTube::with_tagging(true));
+        let provider: Arc<dyn meowtify_provider::Provider> = Arc::new(meowtify_provider::Chain::new(native_youtube, yt_dlp_youtube));
         // Other sources for songs YouTube does not have: SoundCloud (through yt-dlp) and Audius.
         let soundcloud: Arc<dyn meowtify_provider::Provider> = Arc::new(SoundCloud::new(YouTube::with_yt_dlp(tools, yt)));
         autoplay_providers = Some((provider.clone(), vec![soundcloud, Arc::new(Audius)]));

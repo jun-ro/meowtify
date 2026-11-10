@@ -13,8 +13,17 @@ pub struct Settings {
     pub discord: bool,
     /// Save data on a metered link (a phone's cellular): downloads use the low bitrate AAC
     /// instead of the best one, and are replaced by the better copy once an unmetered link
-    /// (Wi-Fi) is back. Off by default.
+    /// (Wi-Fi) is back. Off by default. Old files only have this field; new ones use
+    /// `bitrate_mode`, which this stands in for when it says `low`.
     pub low_bitrate: bool,
+    /// How downloads pick their bitrate: "off" (always the best copy), "auto" (small on a
+    /// metered or slow link, best otherwise) or "low" (always small). "off" by default.
+    #[serde(default = "default_bitrate_mode")]
+    pub bitrate_mode: String,
+    /// Browser whose cookies yt-dlp reads to get past YouTube's sign-in check: firefox,
+    /// chrome, edge, brave, chromium, opera or vivaldi. Empty means off.
+    #[serde(default)]
+    pub cookies_browser: String,
     /// Start playing a YouTube result while it is still downloading. Off by default.
     pub stream_playback: bool,
     /// When the queue runs out, keep playing songs close to the current one. Off by default.
@@ -43,12 +52,18 @@ pub struct Settings {
 pub const AHEAD_RANGE: std::ops::RangeInclusive<u8> = 2..=30;
 pub const BEHIND_RANGE: std::ops::RangeInclusive<u8> = 0..=20;
 
+fn default_bitrate_mode() -> String {
+    "off".to_string()
+}
+
 impl Default for Settings {
     fn default() -> Settings {
         Settings {
             library_dir: None,
             discord: false,
             low_bitrate: false,
+            bitrate_mode: default_bitrate_mode(),
+            cookies_browser: String::new(),
             stream_playback: false,
             autoplay: false,
             autoplay_ahead: 8,
@@ -82,6 +97,20 @@ fn path() -> PathBuf {
 }
 
 impl Settings {
+    /// The bitrate mode the provider should use. An old file has `low_bitrate: true` and no
+    /// `bitrate_mode` (or `"off"`), which means the data-saving copy; everything else is
+    /// normalized to a lowercase mode name.
+    pub fn effective_bitrate_mode(&self) -> String {
+        let mode = self.bitrate_mode.trim();
+        if self.low_bitrate && (mode.is_empty() || mode.eq_ignore_ascii_case("off")) {
+            "low".to_string()
+        } else if mode.is_empty() {
+            "off".to_string()
+        } else {
+            mode.to_ascii_lowercase()
+        }
+    }
+
     /// Reads the settings file. A missing or damaged file gives the defaults.
     pub fn load() -> Settings {
         std::fs::read(path()).map(|b| Settings::parse(&b)).unwrap_or_default()
@@ -130,10 +159,27 @@ mod tests {
 
     #[test]
     fn round_trips_and_tolerates_unknown_or_missing_fields() {
-        let s = Settings { library_dir: Some(PathBuf::from("D:/Music")), discord: true, low_bitrate: true, stream_playback: true, autoplay: true, autoplay_ahead: 12, autoplay_behind: 1, lastfm_key: "k".into(), proxy: "socks5h://h:1".into(), jam_relay: "wss://j.example".into(), jam_name: "Sleepy Otter".into(), jam_hue: Some(200), jam_share_ip: true };
+        let s = Settings { library_dir: Some(PathBuf::from("D:/Music")), discord: true, low_bitrate: true, bitrate_mode: "auto".into(), cookies_browser: "firefox".into(), stream_playback: true, autoplay: true, autoplay_ahead: 12, autoplay_behind: 1, lastfm_key: "k".into(), proxy: "socks5h://h:1".into(), jam_relay: "wss://j.example".into(), jam_name: "Sleepy Otter".into(), jam_hue: Some(200), jam_share_ip: true };
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
         assert_eq!(serde_json::from_str::<Settings>("{}").unwrap(), Settings::default());
         assert!(serde_json::from_str::<Settings>(r#"{"future":1}"#).is_ok());
+    }
+
+    #[test]
+    fn an_old_low_bitrate_setting_means_low() {
+        // A file written before the mode existed.
+        let old = Settings::parse(br#"{"low_bitrate": true}"#);
+        assert_eq!(old.bitrate_mode, "off", "the missing field gets the default");
+        assert_eq!(old.effective_bitrate_mode(), "low");
+
+        let off = Settings::parse(br#"{"low_bitrate": false}"#);
+        assert_eq!(off.effective_bitrate_mode(), "off");
+
+        // A new file wins over the old flag, whichever way it points.
+        let chosen = Settings { low_bitrate: true, bitrate_mode: "Auto".into(), ..Settings::default() };
+        assert_eq!(chosen.effective_bitrate_mode(), "auto");
+        let chosen = Settings { low_bitrate: true, bitrate_mode: "off".into(), ..Settings::default() };
+        assert_eq!(chosen.effective_bitrate_mode(), "low", "an explicit off with the old flag agrees with the flag");
     }
 }

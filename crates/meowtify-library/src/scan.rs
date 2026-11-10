@@ -7,6 +7,8 @@ use std::sync::Arc;
 use lofty::prelude::*;
 use meowtify_core::{Album, Artist, Track};
 
+use crate::artists::{clean_artist, ArtistIndex};
+
 /// Extensions the player can decode.
 pub const AUDIO_EXTENSIONS: [&str; 7] = ["m4a", "mp3", "flac", "ogg", "wav", "aac", "mp4"];
 
@@ -75,18 +77,19 @@ impl Interner {
     }
 }
 
-/// Reads one file. Missing tags fall back to the file name.
-fn read_track(path: &Path, interner: &mut Interner) -> Option<Track> {
+/// Reads one file. Missing tags fall back to the artist sidecar, then the file name.
+fn read_track(path: &Path, interner: &mut Interner, artists: &ArtistIndex) -> Option<Track> {
     let tagged = lofty::read_from_path(path).ok()?;
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown");
+    let uri = path.to_string_lossy().into_owned();
     let title = tag.and_then(|t| t.title().map(|c| c.into_owned())).filter(|s| !s.trim().is_empty());
-    let artist_name = tag.and_then(|t| t.artist().map(|c| c.into_owned())).filter(|s| !s.trim().is_empty());
+    let tag_artist = tag.and_then(|t| t.artist().map(|c| c.into_owned()));
     let album_name = tag.and_then(|t| t.album().map(|c| c.into_owned())).filter(|s| !s.trim().is_empty());
 
-    let artist = interner.artist(artist_name.as_deref().unwrap_or("Unknown artist"));
+    let artist_name = artist_name(tag_artist.as_deref(), &uri, artists);
+    let artist = interner.artist(&artist_name);
     let album = album_name.map(|a| interner.album(&a, &artist));
-    let uri = path.to_string_lossy().into_owned();
     let name: Arc<str> = title.as_deref().unwrap_or_else(|| name_from_stem(stem, &uri)).into();
     Some(Track {
         id: path_id(&uri).into(),
@@ -96,6 +99,15 @@ fn read_track(path: &Path, interner: &mut Interner) -> Option<Track> {
         album,
         duration_ms: tagged.properties().duration().as_millis().min(u32::MAX as u128) as u32,
     })
+}
+
+/// The artist of a file: its tag when that names one, else the sidecar entry for the id in its
+/// name, else "Unknown artist".
+fn artist_name(tag_artist: Option<&str>, uri: &str, artists: &ArtistIndex) -> String {
+    tag_artist
+        .and_then(clean_artist)
+        .or_else(|| meowtify_core::download_id(uri).and_then(|id| artists.get(id)))
+        .unwrap_or_else(|| "Unknown artist".to_string())
 }
 
 /// The title for a file with no title tag: its name, without the ` [id]` a download carries.
@@ -112,9 +124,13 @@ fn name_from_stem<'a>(stem: &'a str, path: &str) -> &'a str {
 /// Scans `dir` and returns its tracks sorted by artist, album, title.
 /// Files that cannot be read are skipped.
 pub fn scan(dir: &Path) -> Vec<Track> {
+    scan_with(dir, ArtistIndex::local())
+}
+
+/// [`scan`] against a given artist index, so a test does not touch the user's file.
+pub(crate) fn scan_with(dir: &Path, artists: &ArtistIndex) -> Vec<Track> {
     let mut interner = Interner::default();
-    let mut tracks: Vec<Track> =
-        find_audio_files(dir).iter().filter_map(|p| read_track(p, &mut interner)).collect();
+    let mut tracks: Vec<Track> = find_audio_files(dir).iter().filter_map(|p| read_track(p, &mut interner, artists)).collect();
     tracks.sort_by_cached_key(sort_key);
     tracks
 }
@@ -132,7 +148,7 @@ pub(crate) fn sort_key(t: &Track) -> (String, String, String) {
 /// The details come from the search result.
 pub(crate) fn track_from_meta(path: &Path, title: &str, artist: &str, duration_ms: u32) -> Track {
     let mut interner = Interner::default();
-    let artist = interner.artist(if artist.trim().is_empty() { "Unknown artist" } else { artist.trim() });
+    let artist = interner.artist(clean_artist(artist).as_deref().unwrap_or("Unknown artist"));
     let uri = path.to_string_lossy().into_owned();
     Track {
         id: path_id(&uri).into(),
@@ -146,7 +162,7 @@ pub(crate) fn track_from_meta(path: &Path, title: &str, artist: &str, duration_m
 
 /// Reads one file. `None` when it cannot be read as music.
 pub(crate) fn read_one(path: &Path) -> Option<Track> {
-    read_track(path, &mut Interner::default())
+    read_track(path, &mut Interner::default(), ArtistIndex::local())
 }
 
 #[cfg(test)]
@@ -173,6 +189,45 @@ mod tests {
     fn path_ids_are_stable_and_distinct() {
         assert_eq!(path_id("a"), path_id("a"));
         assert_ne!(path_id("a"), path_id("b"));
+    }
+
+    fn index_with(entries: &[(&str, &str)]) -> (ArtistIndex, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("meowtify-scan-artists-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let index = ArtistIndex::new(dir.join("artists.json"));
+        for (id, artist) in entries {
+            index.set(id, artist);
+        }
+        (index, dir)
+    }
+
+    #[test]
+    fn the_tag_wins_over_the_sidecar_which_wins_over_unknown() {
+        let (index, dir) = index_with(&[("dQw4w9WgXcQ", "From the index")]);
+        let uri = "/m/Song [dQw4w9WgXcQ].m4a";
+        assert_eq!(artist_name(Some("From the tag"), uri, &index), "From the tag");
+        assert_eq!(artist_name(Some("   "), uri, &index), "From the index", "a blank tag names nobody");
+        assert_eq!(artist_name(None, uri, &index), "From the index");
+        assert_eq!(artist_name(None, "/m/Song [aaaaaaaaaaa].m4a", &index), "Unknown artist");
+        assert_eq!(artist_name(None, "/m/plain.mp3", &index), "Unknown artist");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_topic_suffix_never_reaches_the_library() {
+        let (index, dir) = index_with(&[]);
+        let uri = "/m/Song [dQw4w9WgXcQ].m4a";
+        assert_eq!(artist_name(Some("Rick Astley - Topic"), uri, &index), "Rick Astley");
+        assert_eq!(artist_name(Some("  Rick Astley - topic  "), uri, &index), "Rick Astley");
+        assert_eq!(artist_name(Some("Artist - TopicB"), uri, &index), "Artist - TopicB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_download_name_supplies_the_id_behind_the_title() {
+        let uri = "/m/( T_T ) [P2oz2RBtjWQ].m4a";
+        assert_eq!(meowtify_core::download_id(uri), Some("P2oz2RBtjWQ"));
+        assert_eq!(name_from_stem("( T_T ) [P2oz2RBtjWQ]", uri), "( T_T )");
     }
 
     #[test]

@@ -112,7 +112,11 @@ fn item(r: &Value) -> Option<Item> {
         provider: "audius",
         url: format!("https://audius.co{permalink}"),
         duration_secs: r.get("duration").and_then(Value::as_u64).map(|d| d as u32),
-        thumbnail: None,
+        thumbnail: ["480x480", "150x150", "1000x1000"]
+            .iter()
+            .find_map(|size| r.pointer(&format!("/artwork/{size}")).and_then(Value::as_str))
+            .filter(|u| u.starts_with("https://"))
+            .map(str::to_string),
         id,
         title,
         artist,
@@ -122,6 +126,20 @@ fn item(r: &Value) -> Option<Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_artwork_link_is_read_when_it_is_https() {
+        let body = br#"{"data":[
+            {"id":"A1","title":"a","artwork":{"150x150":"https://n.audius.co/a/150x150.jpg","480x480":"https://n.audius.co/a/480x480.jpg"}},
+            {"id":"A2","title":"b","artwork":{"150x150":"https://n.audius.co/b/150x150.jpg"}},
+            {"id":"A3","title":"c","artwork":{"480x480":"http://n.audius.co/c.jpg"}},
+            {"id":"A4","title":"d"}]}"#;
+        let got = parse_search(body).unwrap();
+        assert_eq!(got[0].thumbnail.as_deref(), Some("https://n.audius.co/a/480x480.jpg"));
+        assert_eq!(got[1].thumbnail.as_deref(), Some("https://n.audius.co/b/150x150.jpg"));
+        assert_eq!(got[2].thumbnail, None);
+        assert_eq!(got[3].thumbnail, None);
+    }
 
     #[test]
     fn reads_search_answers() {

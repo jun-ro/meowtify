@@ -25,6 +25,8 @@ mod get;
 #[cfg(any(debug_assertions, feature = "dev"))]
 mod dev;
 mod jam;
+#[cfg(windows)]
+mod login;
 mod lyrics;
 mod menu;
 mod mascot;
@@ -274,6 +276,12 @@ pub fn run(
             let (library, weak) = (library.clone(), weak.clone());
             // The copy and the tag read can be slow (a big file, a slow disk): not on the UI thread.
             rt_keep.spawn_blocking(move || {
+                // The playing song's artist is known, even if the cache file's tags are not.
+                if let Some(t) = library.find(&uri) {
+                    if let Some(artist) = t.artists.first() {
+                        library.remember_artist(&to.to_string_lossy(), &artist.name);
+                    }
+                }
                 let copied = if to.exists() { Ok(()) } else { std::fs::copy(&from, &to).map(|_| ()) };
                 let added = copied.as_ref().ok().and_then(|_| library.add_file(&to));
                 let _ = slint::invoke_from_event_loop(move || {
@@ -307,6 +315,73 @@ pub fn run(
         win.on_set_discord(move |on| {
             set(on);
             update_settings(&weak, |s| s.discord = on);
+        });
+    }
+    // Settings > Downloader: the download quality, and the browser yt-dlp reads cookies from.
+    // Both reach the provider at once and are saved through the usual settings update.
+    win.set_bitrate_mode(match settings.effective_bitrate_mode().as_str() {
+        "auto" => 1,
+        "low" => 2,
+        _ => 0,
+    });
+    {
+        let weak = win.as_weak();
+        win.on_set_bitrate_mode(move |choice| {
+            let mode = match choice {
+                1 => meowtify_provider::BitrateMode::Auto,
+                2 => meowtify_provider::BitrateMode::Low,
+                _ => meowtify_provider::BitrateMode::Off,
+            };
+            meowtify_provider::set_bitrate_mode(mode);
+            update_settings(&weak, |s| {
+                s.bitrate_mode = mode.as_str().to_string();
+                // An old file's on/off flag still means "low", so an explicit choice clears it.
+                s.low_bitrate = false;
+            });
+        });
+    }
+    // Windows only: the in-app "Sign in to YouTube" button. Its window is this same exe with
+    // `--login`, so the updater carries no second program. That window is a separate process
+    // (about 490 MB while open); the app only keeps a thread that waits for it. The plaintext
+    // cookies live under config_dir()/tmp and only while the app runs.
+    win.set_login_supported(cfg!(windows));
+    #[cfg(windows)]
+    {
+        win.set_login_signed_in(login::start_session());
+        let weak = win.as_weak();
+        win.on_sign_in_out(move || {
+            let Some(w) = weak.upgrade() else { return };
+            if w.get_signing_in() {
+                return;
+            }
+            if w.get_login_signed_in() {
+                login::sign_out();
+                w.set_login_signed_in(false);
+                w.set_login_note(
+                    "To end the session on Google too, sign out in your Google account's security page.".into(),
+                );
+                w.set_status("Signed out of YouTube.".into());
+                return;
+            }
+            w.set_signing_in(true);
+            w.set_login_note(SharedString::default());
+            let weak = w.as_weak();
+            // The sign-in window belongs to another process: wait for it off the UI thread.
+            std::thread::spawn(move || {
+                let result = login::sign_in();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(w) = weak.upgrade() else { return };
+                    w.set_signing_in(false);
+                    match result {
+                        Ok(true) => {
+                            w.set_login_signed_in(true);
+                            w.set_status("Signed in to YouTube.".into());
+                        }
+                        Ok(false) => w.set_status("Sign-in closed before it finished.".into()),
+                        Err(e) => w.set_status(e.into()),
+                    }
+                });
+            });
         });
     }
     let thumbs = Rc::new(thumbs::Thumbs::new(rt.clone()));
@@ -400,10 +475,11 @@ pub fn run(
         }
     };
 
-    {
+    // The timer keeps the quiet update re-check alive as long as the window.
+    let _update_timer = {
         let browser = browser.clone();
-        update::install(&win, rt.clone(), Rc::new(move |text| browser.toast(text)));
-    }
+        update::install(&win, rt.clone(), Rc::new(move |text| browser.toast(text)))
+    };
     {
         let browser = browser.clone();
         jam::install(&win, handle.clone(), browser.library.clone(), rt.clone(), Rc::new(move |text| browser.toast(text)), open_links, settings);
@@ -731,9 +807,9 @@ pub fn run(
 
     lyrics::install(&win, rt.clone());
 
-    // Screenshot and test aids; see `dev`. The timer lives as long as the window.
+    // Screenshot and test aids; see `dev`. The timers live as long as the window.
     #[cfg(any(debug_assertions, feature = "dev"))]
-    let _dev_timer = dev::install(&win);
+    let _dev_timers = dev::install(&win);
 
     browser.load_playlists();
     match &browser.library {
@@ -746,6 +822,9 @@ pub fn run(
     }
     send(Command::Refresh);
     let result = win.run();
+    // The sign-in's cookies are only decrypted while the app runs.
+    #[cfg(windows)]
+    login::cleanup_session();
     BROWSER.with(|b| *b.borrow_mut() = None);
     THUMBS.with(|t| *t.borrow_mut() = None);
     MASCOT.with(|m| *m.borrow_mut() = None);
@@ -874,6 +953,15 @@ impl Browser {
             };
             w.set_library_info(msg.into());
         }
+        if let Some(library) = &self.library {
+            // Songs that already carry an artist in their tags fill the sidecar, so a later
+            // tag write failure does not cost the artist.
+            for t in library.tracks().iter() {
+                if let Some(artist) = t.artists.first() {
+                    library.remember_artist(&t.uri, &artist.name);
+                }
+            }
+        }
         self.start(Kind::Liked);
         get::GET.with(|g| {
             if let Some(g) = g.borrow().as_ref() {
@@ -884,9 +972,9 @@ impl Browser {
     }
 
     /// Background work that starts once the library is listed: downloads saved without an
-    /// artist get it from the provider again, and low bitrate copies are replaced by the
-    /// better one while the link is not metered. Both keep the file path, so playlists and
-    /// the library index stay valid.
+    /// artist get it from the artist sidecar, or failing that from the provider again, and low
+    /// bitrate copies are replaced by the better one while the link is not metered. All keep the
+    /// file path, so playlists and the library index stay valid.
     fn start_maintenance(self: &Rc<Self>) {
         if self.maintenance.replace(true) {
             return;
@@ -896,27 +984,74 @@ impl Browser {
         self.rt.spawn(async move {
             let mut fixed = false;
             let playing = playing_uri();
+            let named = |t: &Track| {
+                t.artists.iter().any(|a| {
+                    let name = a.name.trim();
+                    !name.is_empty() && !name.eq_ignore_ascii_case("unknown artist")
+                })
+            };
+
+            // The sidecar first: for these, no network is needed at all.
+            let mut lookup = Vec::new();
             for (path, id) in library.missing_artist_downloads(REPAIR_LIMIT) {
                 // Writing tags rewrites the file; never do that under the player.
                 if playing.as_deref() == Some(path.to_string_lossy().as_ref()) {
                     continue;
                 }
-                let url = format!("https://www.youtube.com/watch?v={id}");
-                let Ok(items) = provider.resolve(&url).await else { continue };
-                let Some(item) = items.into_iter().find(|i| i.id == id) else { continue };
-                if item.artist.trim().is_empty() || provider.finish(&item, &path).await.is_err() {
+                let Some(artist) = library.indexed_artist(&id) else {
+                    lookup.push((path, id));
                     continue;
+                };
+                // Best effort: with ffmpeg the file keeps its artist without the sidecar.
+                if let Some(track) = library.find(&path.to_string_lossy()) {
+                    let item = meowtify_provider::Item {
+                        provider: "youtube",
+                        id: id.clone(),
+                        title: track.name.to_string(),
+                        artist,
+                        duration_secs: Some(track.duration_ms / 1000),
+                        url: format!("https://www.youtube.com/watch?v={id}"),
+                        thumbnail: None,
+                    };
+                    let _ = provider.finish(&item, &path).await;
                 }
                 // Reading the tags again is disk work: do it here, not on the UI thread.
                 let (l, p) = (library.clone(), path.clone());
                 let refreshed = tokio::task::spawn_blocking(move || l.reload_file(&p)).await.ok().flatten();
-                let named = refreshed.is_some_and(|t| {
-                    t.artists.iter().any(|a| {
-                        let name = a.name.trim();
-                        !name.is_empty() && !name.eq_ignore_ascii_case("unknown artist")
-                    })
-                });
-                fixed |= named;
+                fixed |= refreshed.as_ref().is_some_and(named);
+            }
+            if fixed {
+                refresh_library();
+            }
+
+            // Only the ones the sidecar does not know need the provider. A failure is remembered
+            // for a day, so a download under YouTube's bot check is not tried every launch.
+            for (path, id) in lookup {
+                if library.artist_repair_failed(&id) {
+                    continue;
+                }
+                let url = format!("https://www.youtube.com/watch?v={id}");
+                let failed = match provider.resolve(&url).await {
+                    Ok(items) => match items.into_iter().find(|i| i.id == id) {
+                        Some(item) if !item.artist.trim().is_empty() => {
+                            if provider.finish(&item, &path).await.is_err() {
+                                true
+                            } else {
+                                library.remember_artist(&path.to_string_lossy(), &item.artist);
+                                // Reading the tags again is disk work: do it here, not on the UI thread.
+                                let (l, p) = (library.clone(), path.clone());
+                                let refreshed = tokio::task::spawn_blocking(move || l.reload_file(&p)).await.ok().flatten();
+                                fixed |= refreshed.as_ref().is_some_and(named);
+                                false
+                            }
+                        }
+                        _ => true,
+                    },
+                    Err(_) => true,
+                };
+                if failed {
+                    library.note_artist_repair_failed(&id);
+                }
             }
             if fixed {
                 refresh_library();
@@ -1159,6 +1294,32 @@ fn cover_of(video_id: &str) -> Image {
     }
 }
 
+/// The cache key of a cover that comes from a link of a fallback source. It starts with `x`, which
+/// no YouTube-id key can do together with its length of 11, and has only letters and digits, so
+/// it is safe as a file name in the cover cache.
+fn link_key(link: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in link.bytes() {
+        h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("x{h:016x}x")
+}
+
+/// The cover at `link`: the saved one, or grey while it loads. Same cache as [`cover_of`].
+fn cover_of_link(key: &str, link: &str) -> Image {
+    match THUMBS.with(|th| th.borrow().as_ref().and_then(|t| t.cached(key))) {
+        Some(img) => img,
+        None => {
+            THUMBS.with(|th| {
+                if let Some(th) = th.borrow().as_ref() {
+                    th.fetch(key, link);
+                }
+            });
+            grey_art()
+        }
+    }
+}
+
 /// A video id a jam host sent is used only when it has the form of a YouTube id.
 fn valid_video_id(id: &str) -> bool {
     id.len() == 11 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
@@ -1230,10 +1391,19 @@ fn set_up_next(w: &MainWindow, q: &meowtify_core::Queue) {
     let mut vids: Vec<Option<String>> = Vec::with_capacity(shown.len());
     let mut rows: Vec<UpNext> = Vec::with_capacity(shown.len());
     for ((_, kind, t), mark) in shown.iter().zip(&marks) {
-        let vid = meowtify_core::youtube_id(&t.uri).map(str::to_string);
+        let mut vid = meowtify_core::youtube_id(&t.uri).map(str::to_string);
         let art = match &vid {
             Some(v) => cover_of(v),
-            None => Image::from_rgba8(make_art(art_id(t))),
+            // A song of a fallback source (SoundCloud, Audius): its cover link, when it had one.
+            None => match meowtify_autoplay::cover_link(&t.uri) {
+                Some(link) => {
+                    let key = link_key(&link);
+                    let img = cover_of_link(&key, &link);
+                    vid = Some(key);
+                    img
+                }
+                None => Image::from_rgba8(make_art(art_id(t))),
+            },
         };
         vids.push(vid);
         rows.push(UpNext { title: t.name.as_ref().into(), artist: artist_line(t).into(), kind: *kind, art, has_mark: mark.is_some(), mark: mark.unwrap_or_default() });

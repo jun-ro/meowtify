@@ -1017,6 +1017,8 @@ impl Get {
         if let Some(library) = &self.library {
             for j in &snapshot {
                 if let JobState::Done(path) = &j.state {
+                    // The artist is known here even when the file's tags ended up without it.
+                    library.remember_artist(&path.to_string_lossy(), &j.item.artist);
                     if self.added.borrow_mut().insert(j.id) {
                         if j.stream && j.ready.is_some() {
                             self.finish_stream(j.item.clone(), path.clone());

@@ -6,6 +6,7 @@
 //! reports progress.
 
 mod audius;
+mod chain;
 mod link;
 mod lyrics;
 mod manager;
@@ -27,16 +28,20 @@ use async_trait::async_trait;
 pub use recommend::{
     main_artist, normalize, pick_match, resolve, song_key, variants, valid_lastfm_key, Candidate, DeezerRadio, LastFmSimilar, Recommender, Seed, YtMusicRadio,
 };
-pub use net::{proxy, set_proxy, validate_proxy};
-pub use link::{low_bitrate, metered, save_data, set_low_bitrate, set_metered};
+pub use net::{login_cookies, proxy, set_cookies_browser, set_login_cookies, set_proxy, take_cookie_problem, validate_proxy, COOKIE_BROWSERS};
+pub use link::{bitrate_mode, low_bitrate, metered, save_data, set_bitrate_mode, set_low_bitrate, set_metered, BitrateMode};
 pub use manager::{DownloadManager, Job, JobState, DEFAULT_PARALLEL};
 pub use audius::Audius;
+pub use chain::Chain;
 #[cfg(any(target_os = "ios", feature = "native-extract"))]
 pub use native::{providers as native_providers, NativeSoundCloud, NativeYouTube};
 pub use lyrics::{find as find_lyrics, Line as LyricLine, Lyrics, Query as LyricsQuery};
 pub use soundcloud::SoundCloud;
 pub mod app_update {
-    pub use crate::update::{check, check_with, clean_up, install, install_program, Program, Release};
+    pub use crate::update::{
+        check, check_with, clean_up, install, install_program, install_program_with_progress, install_with_progress, rate_limited, wait_after, Program,
+        Release, RATE_LIMIT_PAUSE, RECHECK_EVERY,
+    };
 }
 pub use youtube::{validate_youtube_url, yt_dlp_version, Tools, YouTube};
 pub use ytdlp::{fetch_thumbnail, suggest, UpdateOutcome, YtDlp};

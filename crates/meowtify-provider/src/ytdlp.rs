@@ -261,14 +261,34 @@ fn parse_suggestions_value(v: &serde_json::Value) -> Result<Vec<String>> {
 
 const THUMB_PREFIX: &str = "https://i.ytimg.com/vi/";
 
-/// Downloads a YouTube cover image (at most 1 MB, 10 seconds). Only `i.ytimg.com`
-/// links are accepted, so this cannot be pointed at other hosts.
+/// Whether `url` is a cover link of a fallback source (SoundCloud, Audius): https, a named host
+/// (no IP address, no `localhost`, no login part), no spaces or control characters. The content
+/// nodes of Audius change, so the host cannot be a fixed list; the 1 MB limit and the image
+/// decoder bound what a wrong link can do.
+pub fn external_cover_url_ok(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else { return false };
+    if url.len() > 400 || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') || authority.contains('[') {
+        return false;
+    }
+    let host = authority.split(':').next().unwrap_or("").to_ascii_lowercase();
+    let named = host.contains('.') && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+    let numeric = host.chars().all(|c| c.is_ascii_digit() || c == '.');
+    named && !numeric && host != "localhost" && !host.ends_with(".local") && !host.ends_with(".internal")
+}
+
+/// Downloads a cover image (at most 1 MB, 10 seconds). Accepts `i.ytimg.com` video covers and
+/// the cover links of the fallback sources (see [`external_cover_url_ok`]), so this cannot be
+/// pointed at a local address.
 pub async fn fetch_thumbnail(url: &str) -> Result<Vec<u8>> {
-    let ok = url.len() <= 200
+    let yt = url.len() <= 200
         && url.starts_with(THUMB_PREFIX)
         && url[THUMB_PREFIX.len()..].chars().all(|c| c.is_ascii_alphanumeric() || "-_/.".contains(c));
-    if !ok {
-        return Err(ProviderError::Invalid("not a YouTube thumbnail link".to_string()));
+    if !yt && !external_cover_url_ok(url) {
+        return Err(ProviderError::Invalid("not a cover link".to_string()));
     }
     let mut reply = tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -317,6 +337,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn external_covers_must_be_named_https_hosts() {
+        assert!(external_cover_url_ok("https://i1.sndcdn.com/artworks-abc-large.jpg"));
+        assert!(external_cover_url_ok("https://creatornode.audius.co/content/x/480x480.jpg"));
+        assert!(!external_cover_url_ok("http://i1.sndcdn.com/a.jpg"));
+        assert!(!external_cover_url_ok("https://127.0.0.1/a.jpg"));
+        assert!(!external_cover_url_ok("https://192.168.1.2:8080/a.jpg"));
+        assert!(!external_cover_url_ok("https://localhost/a.jpg"));
+        assert!(!external_cover_url_ok("https://user@evil.example/a.jpg"));
+        assert!(!external_cover_url_ok("https://[::1]/a.jpg"));
+        assert!(!external_cover_url_ok("https://printer.local/a.jpg"));
+        assert!(!external_cover_url_ok("https://a.example/a b.jpg"));
+    }
+
+    #[test]
     fn reads_the_suggestion_list() {
         let body = br#"["tsu",["tsubi club","tsunami"],[],{"google:suggestsubtypes":[[512],[512]]}]"#;
         assert_eq!(parse_suggestions(body).unwrap(), vec!["tsubi club", "tsunami"]);
@@ -330,6 +364,20 @@ mod tests {
         assert_eq!(expected_hash(&sums, ASSET).as_deref(), Some("bbb2"));
         assert_eq!(expected_hash("AAA1  other\n", ASSET), None);
         assert_eq!(expected_hash("DDD4  yt-dlp_win.zip\n", "yt-dlp_win.zip").as_deref(), Some("ddd4"));
+    }
+
+    /// Needs the network: `cargo test -p meowtify-provider live_thumbnail -- --ignored --nocapture`.
+    /// The cover of every song the list has not cached comes through this call.
+    #[tokio::test]
+    #[ignore]
+    async fn live_thumbnail_is_fetched_by_the_in_process_client() {
+        for id in ["dQw4w9WgXcQ", "qg18wn-GDRM", "RmYCOm4ehKs"] {
+            let started = std::time::Instant::now();
+            let url = format!("{THUMB_PREFIX}{id}/mqdefault.jpg");
+            let got = fetch_thumbnail(&url).await;
+            eprintln!("{id}: {:?} in {:?}", got.as_ref().map(|b| b.len()), started.elapsed());
+            assert!(got.is_ok_and(|b| b.len() > 1000), "no cover for {id}");
+        }
     }
 
     /// Needs the network: `cargo test -p meowtify-provider live_update -- --ignored --nocapture`
